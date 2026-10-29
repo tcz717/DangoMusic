@@ -7,6 +7,7 @@ import me.sorihiko.dango.DangoLogger
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.StandardCharsets
+import java.util.Collections
 
 /** 逐字歌词里的一个字 / 词 */
 class LyricWord(val startMs: Long, val durMs: Long, val text: String)
@@ -14,11 +15,24 @@ class LyricWord(val startMs: Long, val durMs: Long, val text: String)
 /** @param words 网易云逐字歌词（yrc）里这一句的每个字 / 词的时间；普通 LRC 歌词为 null */
 class LyricLine(val timeMs: Long, val text: String, val words: List<LyricWord>? = null)
 
-class Lyrics(rawLines: List<LyricLine>, val sourceName: String) {
+class Lyrics private constructor(rawLines: List<LyricLine>, val sourceName: String, immutablePrepared: Boolean) {
+    constructor(rawLines: List<LyricLine>, sourceName: String) : this(rawLines, sourceName, false)
+
     /** 去掉"纯音乐，请欣赏"这类提示（网易云给没歌词的歌塞的一句话） */
     private val raw: List<LyricLine> = rawLines.filterNot { isPlaceholder(it.text) }
+        .let { if (immutablePrepared) immutableLines(it) else it }
+
+    internal val unsplitLines: List<LyricLine> get() = raw
+
+    /** Prepare both views before publishing lyrics to a render-thread reader. */
+    internal fun immutablePreparedCopy(): Lyrics = Lyrics(raw, sourceName, true)
 
     companion object {
+        private fun immutableLines(lines: List<LyricLine>): List<LyricLine> =
+            Collections.unmodifiableList(lines.map { line ->
+                LyricLine(line.timeMs, line.text, line.words?.let { Collections.unmodifiableList(ArrayList(it)) })
+            })
+
         fun isPlaceholder(text: String): Boolean {
             val t = text.filter { it.isLetterOrDigit() }.lowercase()
             if (t.isEmpty()) return false
@@ -29,9 +43,11 @@ class Lyrics(rawLines: List<LyricLine>, val sourceName: String) {
 
     /** 网易云常把两句写在同一行（中间隔一个空格），拆成两句的版本 */
     private val split: List<LyricLine> by lazy { LyricSplit.split(raw) }
+    private val preparedSplit: List<LyricLine>? =
+        if (immutablePrepared) immutableLines(LyricSplit.split(raw)) else null
 
     /** 当前用的歌词行：开了 Split lines 就是拆开后的 */
-    val lines: List<LyricLine> get() = if (LyricSplit.enabled) split else raw
+    val lines: List<LyricLine> get() = if (LyricSplit.enabled) preparedSplit ?: split else raw
 
     /** 最后一句开始时间 <= pos 的下标，没有则 -1 */
     fun indexAt(pos: Long): Int {
