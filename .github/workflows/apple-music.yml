@@ -30,7 +30,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Configure with MSVC and the installed Windows SDK
-        run: cmake -S native/apple-music-bridge -B native/apple-music-bridge/build -G "Visual Studio 17 2022" -A x64 -DCMAKE_SYSTEM_VERSION=10.0.22621.0
+        run: cmake -S native/apple-music-bridge -B native/apple-music-bridge/build -G "Visual Studio 17 2022" -A x64 "-DCMAKE_SYSTEM_VERSION=10.0.22621.0"
       - name: Build native helper and protocol tests
         run: cmake --build native/apple-music-bridge/build --config Release
       - name: Test native protocol

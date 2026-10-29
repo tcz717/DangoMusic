@@ -78,7 +78,7 @@ The signed **Lyric offset (ms)** is persisted and shared with internal playback:
 Use Visual Studio 2022 C++ tools, Windows SDK 10.0.22621.0 with C++/WinRT headers (as in CI), CMake 3.21+, and JDK 21. From the repository root:
 
 ```powershell
-cmake -S native/apple-music-bridge -B native/apple-music-bridge/build -A x64 -DCMAKE_SYSTEM_VERSION=10.0.22621.0
+cmake -S native/apple-music-bridge -B native/apple-music-bridge/build -A x64 "-DCMAKE_SYSTEM_VERSION=10.0.22621.0"
 cmake --build native/apple-music-bridge/build --config Release
 ctest --test-dir native/apple-music-bridge/build -C Release --output-on-failure
 cmake --install native/apple-music-bridge/build --config Release --prefix common/core/src/main/resources

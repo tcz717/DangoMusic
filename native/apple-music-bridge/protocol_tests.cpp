@@ -25,7 +25,7 @@ int main() {
     selection.observe("Spotify.exe", 0);
     require(!selection.selected_index(), "Non-Apple session was selected");
     selection.observe(dango::apple_aumid, 1);
-    require(selection.selected_index() == 1, "Unique Apple session was not selected");
+    require(selection.selected_index() == 1u, "Unique Apple session was not selected");
     selection.observe(dango::apple_family, 2);
     require(!selection.selected_index(), "Ambiguous Apple sessions were selected");
     selection.observe(dango::apple_aumid, 3);

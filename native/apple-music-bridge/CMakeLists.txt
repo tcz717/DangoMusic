@@ -3,7 +3,7 @@ project(dango_apple_music_bridge VERSION 1.0 LANGUAGES CXX)
 
 # Runtime: Windows 10 1809 (17763) or newer. Uses only official read-only SMTC APIs.
 # Build with VS 2022 and the Windows SDK 10.0.22621.0:
-# cmake -S native/apple-music-bridge -B native/apple-music-bridge/build -A x64 -DCMAKE_SYSTEM_VERSION=10.0.22621.0
+# cmake -S native/apple-music-bridge -B native/apple-music-bridge/build -A x64 "-DCMAKE_SYSTEM_VERSION=10.0.22621.0"
 # cmake --build native/apple-music-bridge/build --config Release
 # ctest --test-dir native/apple-music-bridge/build -C Release --output-on-failure
 # cmake --install native/apple-music-bridge/build --config Release --prefix common/core/src/main/resources
