@@ -24,7 +24,7 @@ data class PlaybackView(
                 val s = ExternalPlayback.snapshot
                 if (!s.active) return null
                 val track = s.track
-                val key = "${s.key}|lyrics:${track?.key.orEmpty()}"
+                val key = "${s.key}|lyrics:${track?.key.orEmpty()}|${s.lyricSource.orEmpty()}|${s.nativeLyricsStatus}"
                 return PlaybackView(key, s.title, s.artists, s.status == ExternalStatus.PLAYING,
                     s.positionMs, s.durationMs, track, true, s.lyrics)
             }

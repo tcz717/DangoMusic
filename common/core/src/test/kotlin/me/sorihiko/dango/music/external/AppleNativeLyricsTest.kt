@@ -98,6 +98,14 @@ class AppleNativeLyricsTest {
         assertEquals("Hello world", line.words!!.joinToString("") { it.text })
     }
 
+    @Test fun absoluteWordClocksAreNotAddedToParagraphStart() {
+        val xml = """<tt><body><p begin="00:06.000" end="00:08.000"><span begin="00:06.250" end="00:06.700">Hello </span><span begin="7.000" end="8.000">world</span></p></body></tt>"""
+        val line = SecureTtmlParser.parse(xml)!!.single()
+        assertEquals(6000L, line.timeMs)
+        assertEquals(listOf(6250L, 7000L), line.words!!.map { it.startMs })
+        assertEquals(listOf(450L, 1000L), line.words!!.map { it.durMs })
+    }
+
     @Test fun nestedSpansKeepEachTextRunOnceAndRespectInheritedTiming() {
         val ttml = """
             <tt xmlns="urn:ttml"><body><div><p begin="10.000" end="12.000">
@@ -147,13 +155,13 @@ class AppleNativeLyricsTest {
     }
 
     @Test fun iTunesCatalogMatchingRejectsWrongTitleArtistAlbumOrDuration() {
-        val lookup = ITunesCatalogLookup()
+        val lookup = AppleCatalogMetadata
         val player = sample()
-        assertTrue(lookup.metadataMatches(player, "Ｓａｍｐｌｅ", "Artist", "Album", 201_000))
-        assertFalse(lookup.metadataMatches(player, "Sample (Live)", "Artist", "Album", 200_000))
-        assertFalse(lookup.metadataMatches(player, "Sample", "Another Artist", "Album", 200_000))
-        assertFalse(lookup.metadataMatches(player, "Sample", "Artist", "Another Album", 200_000))
-        assertFalse(lookup.metadataMatches(player, "Sample", "Artist", "Album", 202_001))
+        assertTrue(lookup.matches(player, "Ｓａｍｐｌｅ", "Artist", "Album", 201_000))
+        assertFalse(lookup.matches(player, "Sample (Live)", "Artist", "Album", 200_000))
+        assertFalse(lookup.matches(player, "Sample", "Another Artist", "Album", 200_000))
+        assertFalse(lookup.matches(player, "Sample", "Artist", "Another Album", 200_000))
+        assertFalse(lookup.matches(player, "Sample", "Artist", "Album", 202_001))
     }
 
     @Test fun rejectsExternalEntitiesAndOversizedXml() {
@@ -169,7 +177,7 @@ class AppleNativeLyricsTest {
         val root = temp.newFolder().toPath()
         writeCache(root, "ttmlLyrics-a.json")
         val lookup = object : AppleCatalogLookup {
-            override fun resolve(sample: ExternalSample, active: () -> Boolean) = 123L
+            override fun resolve(sample: ExternalSample, catalogIds: List<Long>, active: () -> Boolean) = 123L
         }
         val provider = AppleNativeLyricsResolver(AppleLyricsCacheScanner(listOf(root)), lookup) { true }
         val resolved = provider.resolve(sample()) { true }
@@ -188,7 +196,7 @@ class AppleNativeLyricsTest {
         val lineOnly = """<tt xmlns="urn:ttml"><body><p begin="0s" end="2s">line only</p></body></tt>"""
         writeCache(root, "ttmlLyrics-line.json", ttml = lineOnly)
         val lookup = object : AppleCatalogLookup {
-            override fun resolve(sample: ExternalSample, active: () -> Boolean) = 123L
+            override fun resolve(sample: ExternalSample, catalogIds: List<Long>, active: () -> Boolean) = 123L
         }
         val resolver = AppleNativeLyricsResolver(AppleLyricsCacheScanner(listOf(root)), lookup) { true }
         val resolved = resolver.resolve(sample()) { true }

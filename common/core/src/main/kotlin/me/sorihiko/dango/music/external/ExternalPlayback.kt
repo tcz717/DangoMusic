@@ -17,7 +17,8 @@ object ExternalPlayback {
     private val matches = ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue<Runnable>(1),
         { r -> Thread(r, "Dango-AppleMusic-Lyrics").apply { isDaemon = true } },
         ThreadPoolExecutor.DiscardOldestPolicy())
-    private val engine = ExternalEngine(SystemExternalClock, matches, { MusicSources.api() })
+    private val engine = ExternalEngine(SystemExternalClock, matches, { MusicSources.api() },
+        nativeLyrics = AppleNativeLyricsResolver())
     private var worker: ScheduledExecutorService? = null
     private var provider: ExternalSessionProvider? = null
     private var epoch = 0L
@@ -84,7 +85,10 @@ internal class ExternalEngine(
     private val executor: Executor,
     private val api: () -> MusicSourceApi,
     private val matcher: ExternalMatcher = ExternalMatcher(clock),
-    private val nativeLyrics: AppleNativeLyricsProvider = AppleNativeLyricsResolver(),
+    private val nativeLyrics: AppleNativeLyricsProvider = object : AppleNativeLyricsProvider {
+        override fun resolve(sample: ExternalSample, active: () -> Boolean) =
+            AppleNativeLyricsResult(AppleNativeLyricsStatus.UNSUPPORTED)
+    },
 ) {
     private val timeline = ExternalTimeline(clock)
     private var status = ExternalStatus.DISCONNECTED

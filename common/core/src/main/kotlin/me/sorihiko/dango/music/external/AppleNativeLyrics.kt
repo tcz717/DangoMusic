@@ -8,9 +8,6 @@ import java.io.ByteArrayOutputStream
 import java.nio.channels.Channels
 import java.io.StringReader
 import java.math.BigDecimal
-import java.net.HttpURLConnection
-import java.net.URL
-import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.nio.ByteBuffer
 import java.nio.file.Files
@@ -18,8 +15,6 @@ import java.nio.file.Path
 import java.nio.file.LinkOption
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributes
-import java.text.Normalizer
-import java.util.LinkedHashMap
 import java.util.Locale
 import javax.xml.XMLConstants
 import javax.xml.parsers.DocumentBuilderFactory
@@ -271,7 +266,7 @@ internal object CatalogLyricsId {
 
 internal class AppleNativeLyricsResolver(
     private val scanner: AppleLyricsCacheScanner = AppleLyricsCacheScanner(),
-    private val catalogLookup: AppleCatalogLookup = ITunesCatalogLookup(),
+    private val catalogLookup: AppleCatalogLookup = AppleCacheCatalogLookup(),
     private val windowsSupported: () -> Boolean = {
         System.getProperty("os.name", "").startsWith("Windows", true)
     },
@@ -288,7 +283,7 @@ internal class AppleNativeLyricsResolver(
                 AppleNativeLyricsStatus.INVALID else AppleNativeLyricsStatus.CACHE_MISSING
             return AppleNativeLyricsResult(status, diagnostics = diagnostics)
         }
-        val catalogId = catalogLookup.resolve(sample, active)
+        val catalogId = catalogLookup.resolve(sample, documents.map { it.catalogId }.distinct(), active)
             ?: return AppleNativeLyricsResult(AppleNativeLyricsStatus.NO_CATALOG_MATCH, diagnostics = diagnostics)
         if (!active()) return AppleNativeLyricsResult(diagnostics = diagnostics)
         val candidates = documents.filter { it.catalogId == catalogId }
@@ -317,102 +312,7 @@ internal class AppleNativeLyricsResolver(
 }
 
 internal interface AppleCatalogLookup {
-    fun resolve(sample: ExternalSample, active: () -> Boolean): Long?
-}
-
-internal class ITunesCatalogLookup : AppleCatalogLookup {
-    private data class CacheEntry(val expiresAt: Long, val id: Long?)
-    private val cache = object : LinkedHashMap<String, CacheEntry>(32, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CacheEntry>?) = size > 96
-    }
-
-    override fun resolve(sample: ExternalSample, active: () -> Boolean): Long? {
-        if (sample.title.length !in 1..300 || sample.artists.size != 1 ||
-            sample.artists.single().length !in 1..200 || sample.album.length > 300 ||
-            sample.durationMs !in 1..86_400_000L || !active()) return null
-        val key = listOf(normalize(sample.title), normalize(sample.artists.single()),
-            normalize(sample.album), sample.durationMs.toString()).joinToString("|")
-        val now = System.nanoTime()
-        synchronized(cache) {
-            val cached = cache[key]
-            if (cached != null && now < cached.expiresAt) return cached.id
-        }
-        val result = try { search(sample, active) } catch (_: Exception) { null }
-        synchronized(cache) {
-            val ttl = if (result == null) 15_000_000_000L else 600_000_000_000L
-            cache[key] = CacheEntry(System.nanoTime() + ttl, result)
-        }
-        return result
-    }
-
-    internal fun metadataMatches(
-        sample: ExternalSample,
-        title: String,
-        artist: String,
-        album: String,
-        durationMs: Long,
-    ): Boolean {
-        if (sample.artists.size != 1 || sample.durationMs !in 1..86_400_000L ||
-            durationMs !in 1..86_400_000L) return false
-        val titleMatches = normalize(title) == normalize(sample.title)
-        val artistMatches = normalize(artist) == normalize(sample.artists.singleOrNull().orEmpty())
-        val albumMatches = sample.album.isBlank() || album.isBlank() || normalize(album) == normalize(sample.album)
-        return titleMatches && artistMatches && albumMatches &&
-            kotlin.math.abs(durationMs - sample.durationMs) <= 2000L
-    }
-
-    private fun search(sample: ExternalSample, active: () -> Boolean): Long? {
-        val term = URLEncoder.encode("${sample.title} ${sample.artists.single()}", "UTF-8")
-        val url = URL("https://itunes.apple.com/search?entity=song&limit=20&term=$term")
-        val connection = url.openConnection() as HttpURLConnection
-        try {
-            connection.connectTimeout = 2500
-            connection.readTimeout = 3500
-            connection.setRequestProperty("Accept", "application/json")
-            if (connection.responseCode !in 200..299 || !active()) return null
-            val body = connection.inputStream.use { input ->
-                val output = ByteArrayOutputStream()
-                val buffer = ByteArray(4096)
-                var total = 0
-                while (true) {
-                    val count = input.read(buffer)
-                    if (count < 0) break
-                    total += count
-                    if (total > MAX_ITUNES_BYTES) return null
-                    output.write(buffer, 0, count)
-                }
-                String(output.toByteArray(), StandardCharsets.UTF_8)
-            }
-            if (!BoundedJson.hasSafeDepth(body)) return null
-            val root = JsonParser().parse(body)
-            if (!root.isJsonObject) return null
-            val results = root.asJsonObject.get("results")?.takeIf { it.isJsonArray }?.asJsonArray ?: return null
-            val matches = results.mapNotNull { value ->
-                if (!value.isJsonObject) return@mapNotNull null
-                val item = value.asJsonObject
-                val id = item.get("trackId")?.takeIf { it.isJsonPrimitive }?.asLong ?: return@mapNotNull null
-                val title = string(item, "trackName") ?: return@mapNotNull null
-                val artist = string(item, "artistName") ?: return@mapNotNull null
-                val album = string(item, "collectionName").orEmpty()
-                val duration = item.get("trackTimeMillis")?.takeIf { it.isJsonPrimitive }?.asLong ?: return@mapNotNull null
-                if (metadataMatches(sample, title, artist, album, duration)) id else null
-            }.distinct()
-            return matches.singleOrNull()
-        } finally {
-            connection.disconnect()
-        }
-    }
-
-    private fun string(obj: com.google.gson.JsonObject, key: String): String? =
-        obj.get(key)?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString
-
-    private fun normalize(value: String): String =
-        Normalizer.normalize(value, Normalizer.Form.NFKC).lowercase(Locale.ROOT)
-            .filter { it.isLetterOrDigit() }
-
-    companion object {
-        private const val MAX_ITUNES_BYTES = 256 * 1024
-    }
+    fun resolve(sample: ExternalSample, catalogIds: List<Long>, active: () -> Boolean): Long?
 }
 
 internal object SecureTtmlParser {
@@ -649,10 +549,14 @@ internal object SecureTtmlParser {
         if ((attr(element, "begin") != null && begin == null) ||
             (attr(element, "end") != null && end == null) ||
             (attr(element, "dur") != null && duration == null)) return null
-        val start = begin?.let { safeAdd(parent.startMs, it) } ?: parent.startMs
+        // Apple clock/bare-second timestamps are media-absolute; unit offsets are parent-relative.
+        val start = begin?.let {
+            if (attr(element, "begin")!!.trim().endsWith("s")) safeAdd(parent.startMs, it) else it
+        } ?: parent.startMs
         val finish = when {
             duration != null -> safeAdd(start, duration)
-            end != null -> safeAdd(parent.startMs, end)
+            end != null -> if (attr(element, "end")!!.trim().endsWith("s"))
+                safeAdd(parent.startMs, end) else end
             else -> parent.endMs
         }
         if (start !in 0..MAX_TIME_MS || finish != null && finish !in start..MAX_TIME_MS) return null
