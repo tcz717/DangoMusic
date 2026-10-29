@@ -295,6 +295,20 @@ Apple Music sync requires Windows 10 1809+ (x64).	Apple Music 同步需要 Windo
 Apple Music bridge missing. Install the Windows workflow's bundled mod jar.	缺少 Apple Music 桥接程序。请安装 Windows 工作流中包含桥接程序的 mod jar。
 Apple Music connected; no confident lyric match yet.	已连接 Apple Music；尚未找到可靠匹配的歌词。
 Apple Music connected; lyrics synchronized.	已连接 Apple Music；歌词同步中。
+Apple native cache · %d/%d valid · word-synced.	Apple 原生缓存 · %d/%d 个有效 · 逐词同步。
+Apple native cache · %d/%d valid · partial word sync.	Apple 原生缓存 · %d/%d 个有效 · 部分逐词同步。
+Apple native cache · %d/%d valid · line-synced.	Apple 原生缓存 · %d/%d 个有效 · 逐行同步。
+Apple cache: %d files, %d rejected; no fallback lyrics yet.	Apple 缓存：%d 个文件、%d 个已拒绝；尚无备用歌词。
+Apple cache: %d files, %d rejected; using %s fallback.	Apple 缓存：%d 个文件、%d 个已拒绝；正在使用 %s 备用歌词。
+Apple native lyric match is ambiguous; no fallback lyrics yet.	Apple 原生歌词匹配不明确；尚无备用歌词。
+Apple native lyric match is ambiguous; using %s fallback.	Apple 原生歌词匹配不明确；正在使用 %s 备用歌词。
+Apple native lyric document is invalid; no fallback lyrics yet.	Apple 原生歌词文档无效；尚无备用歌词。
+Apple native lyric document is invalid; using %s fallback.	Apple 原生歌词文档无效；正在使用 %s 备用歌词。
+No verified Apple catalog match or fallback lyrics.	没有已验证的 Apple 曲库匹配或备用歌词。
+No verified Apple catalog match; using %s fallback.	没有已验证的 Apple 曲库匹配；正在使用 %s 备用歌词。
+Apple native lyrics require Windows; no fallback lyrics yet.	Apple 原生歌词需要 Windows；尚无备用歌词。
+Apple native lyrics unavailable; using %s fallback.	Apple 原生歌词不可用；正在使用 %s 备用歌词。
+Apple Music connected; using %s lyrics.	已连接 Apple Music；正在使用 %s 歌词。
 External Player is off.	外部播放器已关闭。
 Apple Music unavailable. Check the bridge, app and timeline.	Apple Music 不可用。请检查桥接程序、应用及播放时间轴。
 Read-only: control playback in Apple Music. Listen Together is disabled.	只读模式：请在 Apple Music 中控制播放；一起听歌已禁用。

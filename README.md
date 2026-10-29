@@ -48,8 +48,8 @@
 使用本 fork 的 **Apple Music Windows bridge** Actions 工作流产物中的 mod jar；其中包含从本仓库源码构建的桥接程序，无需自行运行脚本。
 普通、未打包桥接程序的 jar 仍可正常加载，但不能连接 Apple Music。
 
-1. 在 Apple Music 中播放歌曲。在 Minecraft 按 `M` → ⚙ → **音乐与 HUD** → **播放器**，打开 **外部播放器 / Apple Music**。
-2. 在侧栏选择歌词来源（网易云 / QQ / 酷狗）。匹配仅使用所选来源的搜索和歌词接口，不获取播放地址或下载音频。
+1. 在 Apple Music 中播放歌曲，并打开该歌曲的原生歌词面板（Apple 通常在这里写入本地歌词缓存）。在 Minecraft 按 `M` → ⚙ → **音乐与 HUD** → **播放器**，打开 **外部播放器 / Apple Music**。
+2. Windows 会优先只读检查 Apple Music 原生 TTML 缓存，并定期重试；若缓存缺失、无效或无法唯一匹配，才使用侧栏选定的网易云 / QQ / 酷狗歌词作为明确标注的备用来源。曲库匹配会把标题、歌手发送给公开 iTunes Search 和所选歌词源；不获取播放地址或下载音频。
 3. 确保 **歌词 → 3D 歌词** 开启；可以同时打开 **正在播放 / 封面**。封面来自可靠匹配的歌词曲库，不是 Apple 音频。
 4. **歌词偏移（毫秒）**会自动保存，对两种播放器均生效：正值提前显示歌词，负值延后（`歌词时间 = 播放时间 + 偏移`，限制在歌曲范围内）。例如歌词晚了 500ms，设为 `+500`。
 5. 播放、暂停、拖动、切歌和音量请在 Apple Music 中操作。开启外部模式会停止内置音频并锁住内置播放控制；先退出一起听歌房间才能开启。关闭外部模式不会自动恢复内置播放。
@@ -58,7 +58,7 @@
 Use the mod jar from this fork's **Apple Music Windows bridge** workflow artifact: it bundles the source-built helper and extracts it lazily when enabled.
 Windows 10 1809+, Windows x64 Java, and the Windows Apple Music application's SMTC session are required.
 Other operating systems load normally and display an unsupported status; no Windows library is loaded at startup.
-Choose NetEase, QQ or Kugou in the sidebar for lyric lookup. Enable **3D lyrics**, and optionally **Now playing / Cover**, in Settings.
+Open the song's native lyrics panel in Apple Music so it can materialize its local lyrics cache. Windows checks that cache first and retries periodically; the selected NetEase, QQ or Kugou source is used and labeled only if native lyrics are missing, invalid, or cannot be uniquely matched. Enable **3D lyrics**, and optionally **Now playing / Cover**, in Settings.
 Control playback in Apple Music, not Minecraft. Internal audio stops, internal transport/queue playback is blocked, and Listen Together is unavailable while external mode is active.
 The signed **Lyric offset (ms)** is persisted and shared with internal playback: positive means earlier lyrics, negative means later, clamped to song bounds.
 
@@ -70,7 +70,9 @@ The signed **Lyric offset (ms)** is persisted and shared with internal playback:
 - Polling is every 500ms after each result, with a 2-second helper deadline. A feed expires after 5 seconds without a valid sample. Playing anchors expire after 30 seconds; a provider that publishes less frequently will deliberately show unavailable until its next timeline update. Paused positions never extrapolate and may use an older anchor while samples stay fresh.
 - Matching requires normalized title and the complete artist set, plus a conservative duration tolerance when available. Ambiguous results are rejected. Live/remastered versions, artist aliases, regional catalogs and missing SMTC data can produce **no lyrics**; there is deliberately no fuzzy fallback. The 64-entry cache avoids repeated queries; unsuccessful lookups retry after 30 seconds, never per frame.
 - Word timing, ordinary 3D animation and matched catalog artwork reuse the existing renderer. Audio-energy beat pulses are zero in external mode. Song card and Dynamic Island remain internal-player HUDs.
-- No Apple login is performed by the mod. Enabling matching sends title/artist search queries to the selected lyric provider, which may require network access/account permissions. No Firebase credentials are needed to build or use external lyrics.
+- No Apple login is performed by the mod. Enabling matching sends title/artist metadata to public iTunes Search for catalog correlation and search queries to the selected lyric provider, which may require network access/account permissions. No Firebase credentials are needed to build or use external lyrics.
+- Native lyric cache reads are read-only and Windows-only. The observed package/cache path and JSON/TTML schema are undocumented and may change between Apple Music versions. Native line-only TTML is shown as line-synced; DangoMusic does not invent word timing. The in-game status reports native/fallback provenance and line/word synchronization. Its cache diagnostic is limited to candidate counts and never displays cache paths or lyric text.
+- No Apple web-player login, cookie/token collection, developer token, DRM access, or playback is implemented. The web-player route described in [the feasibility note](docs/apple-music-native-lyrics.md) is research-only.
 - The helper is an unsigned local executable. Windows policy/antivirus may block it; never disable protections or substitute an untrusted executable. Missing helper/app/timeline shows an unavailable status. The helper is not a playback-control API.
 
 **Reproducible bridge and mod build (maintainers)**
@@ -106,8 +108,11 @@ Automated fake-clock/provider tests and portable native protocol tests are separ
 
 Baseline evidence at `88c0691`: [Windows CI run 40840987594](https://github.com/tcz717/DangoMusic/actions/runs/40840987594) passed native build/tests, the one-shot helper contract, common JVM tests/UI build, Fabric 1.21.1 packaging, and embedded-helper verification. Independent local Windows validation also passed 25 JVM tests and Fabric packaging using a temporary source copy restricted to the `1.21.1-fabric` target and an external mirror init script; this is single-target evidence, not an all-variant build. The local SDK 19041 helper/CTest check used the flags above and observed only a stopped/empty Apple Music session, not real playback. Later review-fix validation is reported separately in the PR.
 
+Native-lyrics implementation validation is separate from that baseline: `bash modern/gradlew -p common :core:test :ui:build --no-daemon` passed 43 core tests (27 existing plus 16 deterministic native-lyrics tests) and the shared UI build; the new shared class emits Java 8 bytecode (class-file major 52). Portable native protocol CMake/CTest passed. A local Fabric 1.21.1 build was attempted but could not resolve the configured Architectury Loom `1.13-SNAPSHOT` plugin; Windows helper build/package CI and live Apple Music/Minecraft acceptance remain separate and pending.
+
 - [ ] Enable external mode during internal playback: internal audio stops; queue/transport/hotkeys cannot start a second stream; disabling restores normal internal controls without auto-play.
 - [ ] Play a known matching track in Apple Music: title, artists, cover and timed words appear in the existing 3D renderer. Switch lyric provider and language; verify Chinese/English settings/help/status.
+- [ ] Open the native Apple lyrics panel after a fallback is already visible; confirm the display upgrades without a toggle or track change, and the in-game source/timing status changes to native and word-synced or line-synced as appropriate.
 - [ ] Pause for at least 30 seconds, resume, seek both backward and forward, and change playback rate if exposed: no advance while paused, no stale lyrics after seeks.
 - [ ] Change tracks quickly, including while a lyric query is pending; unrelated/ambiguous recordings show no lyrics and old covers/words do not attach to the new song.
 - [ ] Close/reopen Apple Music, lose the session/timeline, block or terminate the helper, then reconnect: stale content clears and recovery is automatic.
@@ -115,6 +120,8 @@ Baseline evidence at `88c0691`: [Windows CI run 40840987594](https://github.com/
 - [ ] Calibrate `+500` / `-500` ms and song-boundary clamping; restart Minecraft and confirm persistence.
 - [ ] Try Listen Together in external mode and external mode while in a room; confirm mutual exclusion and no external track broadcast.
 - [ ] Load on Linux/macOS, Windows without a helper, and Windows with a blocked helper: normal mod loading, appropriate status, no native startup dependency or crashes.
+
+The pre-development cache scan and synthetic TTML timing fixture are described in [the Apple native lyrics feasibility note](docs/apple-music-native-lyrics.md). They are not live Apple Music or Minecraft acceptance. The native cache upgrade and pause/seek/track-switch checklist above remains pending until performed on Windows with Apple Music and Minecraft.
 
 <details>
 <summary>启用一起听歌（Firebase）</summary>

@@ -16,6 +16,7 @@ class ExternalSnapshot internal constructor(
     val durationMs: Long = 0,
     val positionMs: Long = 0,
     private val match: ExternalMatch? = null,
+    private val nativeResult: AppleNativeLyricsResult = AppleNativeLyricsResult(),
 ) {
     val artists: List<String> = Collections.unmodifiableList(ArrayList(artists))
     val key: String = if (sessionId.isEmpty()) "" else
@@ -23,7 +24,14 @@ class ExternalSnapshot internal constructor(
             .joinToString("|") { "${it.length}:$it" }
     // The historical track model has a mutable coverUrl, so never expose our stored instance.
     val track: NeteaseTrack? get() = match?.copyTrack()
-    val lyrics: Lyrics? get() = match?.lyrics
+    val lyrics: Lyrics? get() = nativeResult.lyrics ?: match?.lyrics
+    val nativeLyricsStatus: AppleNativeLyricsStatus get() = nativeResult.status
+    val nativeCacheFiles: Int get() = nativeResult.diagnostics.filesFound
+    val nativeValidDocuments: Int get() = nativeResult.diagnostics.validDocuments
+    val nativeRejectedDocuments: Int get() = nativeResult.diagnostics.rejectedDocuments
+    val lyricSource: String? get() = lyrics?.sourceName
+    val wordSynchronized: Boolean get() = lyrics?.unsplitLines?.any { it.words?.isNotEmpty() == true } == true
+    val hasFallbackLyrics: Boolean get() = match?.hasLyrics == true
     val energy: Float get() = 0f
     val active: Boolean get() = status == ExternalStatus.PLAYING || status == ExternalStatus.PAUSED
 }
@@ -99,12 +107,13 @@ internal class ExternalTimeline(private val clock: ExternalClock) {
         return true
     }
 
-    fun snapshot(match: ExternalMatch?): ExternalSnapshot {
+    fun snapshot(match: ExternalMatch?, nativeResult: AppleNativeLyricsResult = AppleNativeLyricsResult()): ExternalSnapshot {
         val s = sample ?: return ExternalSnapshot(ExternalStatus.DISCONNECTED)
         val elapsed = ((clock.nanoTime() - receivedNs).coerceAtLeast(0) / 1_000_000L)
         if (elapsed > 5_000 || (s.status == ExternalStatus.PLAYING && anchorAgeMs + elapsed > 30_000))
             return ExternalSnapshot(ExternalStatus.DISCONNECTED)
         val position = (anchorPosition + elapsed * s.playbackRate).coerceIn(0.0, s.durationMs.toDouble()).toLong()
-        return ExternalSnapshot(s.status, s.sessionId, s.title, s.artists, s.album, s.durationMs, position, match)
+        return ExternalSnapshot(s.status, s.sessionId, s.title, s.artists, s.album, s.durationMs, position, match,
+            nativeResult)
     }
 }

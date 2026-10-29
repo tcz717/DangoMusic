@@ -80,23 +80,32 @@ object ExternalPlayback {
 
 /** Serialized publication, with generation checks across session, track, provider and lifecycle changes. */
 internal class ExternalEngine(
-    clock: ExternalClock,
+    private val clock: ExternalClock,
     private val executor: Executor,
     private val api: () -> MusicSourceApi,
     private val matcher: ExternalMatcher = ExternalMatcher(clock),
+    private val nativeLyrics: AppleNativeLyricsProvider = AppleNativeLyricsResolver(),
 ) {
     private val timeline = ExternalTimeline(clock)
     private var status = ExternalStatus.DISCONNECTED
     private var identity: List<String>? = null
     private var generation = 0L
     private var match: ExternalMatch? = null
+    private var nativeResult = AppleNativeLyricsResult()
     private var pendingToken: Long? = null
+    private var nextNativeCheckNs = 0L
+    private var lastSample: ExternalSample? = null
+    private var lastSampleNs = 0L
 
     @Synchronized fun reset(value: ExternalStatus) {
         generation++
         identity = null
         match = null
+        nativeResult = AppleNativeLyricsResult()
         pendingToken = null
+        nextNativeCheckNs = 0L
+        lastSample = null
+        lastSampleNs = 0L
         timeline.accept(null)
         status = value
     }
@@ -109,22 +118,69 @@ internal class ExternalEngine(
         status = sample.status
         val source = api()
         val key = sample.identity() + source.source.key
-        if (key == identity) {
-            if (pendingToken != null || !matcher.retryDue(sample, source.source)) return
-        } else {
+        val changed = key != identity
+        val nowNs = clock.nanoTime()
+        val lifecycleChanged = !changed && isLifecycleChange(lastSample, sample, nowNs - lastSampleNs)
+        if (changed) {
+            generation++
+            pendingToken = null
             identity = key
             match = null
+            nativeResult = AppleNativeLyricsResult()
+            nextNativeCheckNs = 0L
         }
+        lastSample = sample
+        lastSampleNs = nowNs
+        if (lifecycleChanged) {
+            generation++
+            pendingToken = null
+        }
+        if (pendingToken != null) return
+        val checkNative = changed || lifecycleChanged || clock.nanoTime() >= nextNativeCheckNs
+        val resolveFallback = changed || lifecycleChanged || matcher.retryDue(sample, source.source)
+        if (!checkNative && !resolveFallback) return
         val token = ++generation
         pendingToken = token
+        if (checkNative) nextNativeCheckNs = clock.nanoTime() + NATIVE_RETRY_NS
+        val previousMatch = match
+        val previousNative = nativeResult
         executor.execute {
-            val result = matcher.resolve(sample, source) {
-                synchronized(this) { generation == token && identity == key }
-            }
-            synchronized(this) {
-                if (generation == token && identity == key) {
-                    match = result
-                    pendingToken = null
+            var publishedNative = previousNative
+            var publishedMatch = previousMatch
+            try {
+                val resolvedNative = if (checkNative) {
+                    try {
+                        nativeLyrics.resolve(sample) {
+                            synchronized(this) { generation == token && identity == key }
+                        }
+                    } catch (_: Exception) {
+                        AppleNativeLyricsResult(AppleNativeLyricsStatus.INVALID)
+                    }
+                } else previousNative
+                publishedNative = if (resolvedNative.lyrics != null || previousNative.lyrics == null)
+                    resolvedNative else previousNative
+                if (publishedNative.lyrics == null && resolveFallback) {
+                    publishedMatch = matcher.resolve(sample, source) {
+                        synchronized(this) { generation == token && identity == key }
+                    }
+                }
+            } catch (_: Exception) {
+                if (publishedNative.lyrics == null) {
+                    publishedNative = AppleNativeLyricsResult(
+                        AppleNativeLyricsStatus.INVALID,
+                        diagnostics = publishedNative.diagnostics,
+                    )
+                }
+            } finally {
+                synchronized(this) {
+                    if (generation == token && identity == key) {
+                        nativeResult = publishedNative
+                        match = publishedMatch
+                        if (publishedNative.status == AppleNativeLyricsStatus.UNSUPPORTED) {
+                            nextNativeCheckNs = Long.MAX_VALUE
+                        }
+                        pendingToken = null
+                    }
                 }
             }
         }
@@ -134,5 +190,21 @@ internal class ExternalEngine(
         if (status in listOf(ExternalStatus.DISABLED, ExternalStatus.UNSUPPORTED,
                 ExternalStatus.HELPER_MISSING, ExternalStatus.DISCONNECTED))
             ExternalSnapshot(status)
-        else timeline.snapshot(match)
+        else timeline.snapshot(match, nativeResult)
+
+    private fun isLifecycleChange(previous: ExternalSample?, current: ExternalSample, elapsedNs: Long): Boolean {
+        if (previous == null || previous.identity() != current.identity()) return false
+        if (previous.status != current.status) return true
+        val elapsed = elapsedNs.coerceAtLeast(0L) / 1_000_000L
+        if (elapsed > SEEK_DETECTION_WINDOW_MS) return false
+        val expected = previous.positionMs +
+            if (previous.status == ExternalStatus.PLAYING) (elapsed * previous.playbackRate).toLong() else 0L
+        return kotlin.math.abs(current.positionMs - expected) > SEEK_DISCONTINUITY_MS
+    }
+
+    companion object {
+        private const val NATIVE_RETRY_NS = 5_000_000_000L
+        private const val SEEK_DISCONTINUITY_MS = 1_500L
+        private const val SEEK_DETECTION_WINDOW_MS = 2_000L
+    }
 }

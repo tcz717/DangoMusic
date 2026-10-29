@@ -1,0 +1,39 @@
+# Apple Music native lyrics on Windows: feasibility and validation
+
+## Architecture and feasibility
+
+DangoMusic already has an opt-in, read-only Windows SMTC bridge. Its worker publishes Apple Music metadata and a timestamped playback position; the existing lyrics matcher runs off the render thread and uses the selected NetEase, QQ Music, or Kugou provider. `Lyrics`, `LyricLine`, and `LyricWord` already represent timed words, and the 3D renderer consumes that model. Shared core code must remain Java 8 bytecode compatible.
+
+The Windows app cache is a feasible native-lyrics source when Apple has materialized a document. The cache is not guaranteed to exist just because the app is installed or playing. This implementation therefore treats the cache as an optional, read-only source, correlates its catalog ID with current SMTC metadata, and continues to retry while a fallback is visible. A native document with only paragraph timing remains native line-synced lyrics; it is not upgraded by inventing word timings or replacing it with a third-party word-synced lyric.
+
+## Primary-source research
+
+1. [BeteixZ/floating-lyrics-wam, commit `c07b86b1f2fd1da1f510410519a18a510dbd6cd3` (MIT)](https://github.com/BeteixZ/floating-lyrics-wam/tree/c07b86b1f2fd1da1f510410519a18a510dbd6cd3). Its [`AppleMusicCacheScanner`](https://github.com/BeteixZ/floating-lyrics-wam/blob/c07b86b1f2fd1da1f510410519a18a510dbd6cd3/src/AppleMusicLyrics.Infrastructure.Windows/Cache/AppleMusicCacheScanner.cs) searches `%LOCALAPPDATA%/Packages/AppleInc.AppleMusicWin_*/AC/INetCache/**/ttmlLyrics*.json`; its parser reads `lyricsId`, `status`, and `ttml`. [`CatalogLyricsId`](https://github.com/BeteixZ/floating-lyrics-wam/blob/c07b86b1f2fd1da1f510410519a18a510dbd6cd3/src/AppleMusicLyrics.Core/Matching/CatalogLyricsId.cs) identifies `AP_<catalog-id>` with a validated optional hyphen suffix. [`ITunesCatalogSongResolver`](https://github.com/BeteixZ/floating-lyrics-wam/blob/c07b86b1f2fd1da1f510410519a18a510dbd6cd3/src/AppleMusicLyrics.Infrastructure.Windows/Catalog/ITunesCatalogSongResolver.cs) correlates player metadata with public iTunes catalog search. The scanner also has a “latest file” path and duration/content ranking; those are not safe identity checks for this feature and are not used here. The project’s [`TtmlLyricsParser`](https://github.com/BeteixZ/floating-lyrics-wam/blob/c07b86b1f2fd1da1f510519a18a510dbd6cd3/src/AppleMusicLyrics.Core/Parsing/TtmlLyricsParser.cs) extracts paragraph begin/end and separately records Apple `leadingSilence` and `audio lyricOffset`; it does not parse timed child spans into word timings. DangoMusic uses an original parser and does not copy project code.
+2. [Ruytha/lyric-player (AGPL-3.0)](https://github.com/Ruytha/lyric-player). Its [`src/apple-music.js`](https://github.com/Ruytha/lyric-player/blob/main/src/apple-music.js) and [`desktop/main.cjs`](https://github.com/Ruytha/lyric-player/blob/main/desktop/main.cjs) describe an isolated Electron session for `music.apple.com`, with the user signing in on Apple’s page. It invokes the web player’s MusicKit requests for `syllable-lyrics` and `lyrics`, including `ttmlLocalizations`. This is undocumented web-player behavior, not a guaranteed public MusicKit lyrics API. It is research-only here: no AGPL implementation is copied, no credentials or tokens are collected, and no web session or audio playback is added. An end-to-end explicit-login bridge is deferred because it cannot be safely validated in this credential-free runner.
+
+Apple TTML may contain `iTunesMetadata/@leadingSilence` and `audio/@lyricOffset`. The cited parser preserves them as separate metadata instead of folding them into paragraph times. DangoMusic likewise leaves these undocumented offsets unapplied; it preserves TTML word/line timestamps and applies the existing signed user lyric offset once at playback. This avoids guessing at offset semantics or double-shifting lyrics. Foreground timed spans are represented; simultaneous background/translation/agent voices are not a supported multi-voice renderer feature and are excluded rather than merged into foreground text.
+
+## Cache and matching safeguards
+
+- On Windows only, inspect the Apple Music package cache read-only on the existing worker. Bound directory traversal, candidate count, file size, JSON/XML size, and parser complexity; do not follow links outside the expected package cache. A missing, locked, partial, malformed, or unsupported cache document is simply unavailable and can be retried.
+- Accept only successful JSON documents whose validated `AP_` catalog ID matches an unambiguous exact metadata match from public iTunes search. Require normalized title and artist, compatible album when present, and a conservative duration tolerance. Reject ambiguous results; never choose a newest file, duration-only candidate, or lyric text as identity.
+- Native lyric metadata is display-only. It does not create a playable DangoMusic track and does not call a music service’s audio URL, download, or decoder.
+- Continue checking for a native document after fallback success so opening Apple’s lyrics panel later can upgrade the display without changing tracks or toggling external mode. Generation checks prevent results from a prior track, seek/source/lifecycle generation from publishing.
+- Cache diagnostics expose counts, provenance, and line/word timing only. They never print cache paths, raw TTML, lyric text, account state, or credentials.
+
+## POC and acceptance evidence
+
+Before implementation, a user-run Windows read-only scan found the Apple Music package folder but **zero** `ttmlLyrics*.json` documents in the exact `AC/INetCache` route. A synthetic Apple-shaped JSON/TTML fixture with timed child spans was reported to yield word start/duration values of `1250/450 ms` and `2000/1000 ms`, with `Hello world` spacing. This is synthetic parser feasibility only; it is not evidence that a live Apple Music cache was produced or that Minecraft displayed native lyrics.
+
+**Live acceptance is pending.** No Apple Music account, credentials, or Windows Minecraft session is available to this runner. The user’s requested live test—open the Apple lyrics panel, observe the native cache arrive, then verify native word-timed 3D lyrics through pause, seek, and track switch—has not been performed. Do not treat the synthetic fixture or the prior SMTC helper CI as that acceptance.
+
+## Manual read-only smoke checklist
+
+1. Use a Windows build containing the bundled helper. Enable external Apple Music mode and play a track.
+2. Initially inspect the in-game source/timing status. If no cache document exists, a selected lyric provider may supply a clearly labeled fallback.
+3. Open that track’s lyrics panel in the Apple Music app. Without changing track or toggling external mode, wait for the next bounded cache scan; confirm the status upgrades to Apple native lyrics if the catalog match is unique.
+4. Confirm diagnostics report only cache/document counts, provenance, and whether timing is line- or word-synced. They must not expose paths or lyric text.
+5. Pause, resume, seek both directions, and switch tracks while checking that timings follow SMTC and no previous track’s lyric remains.
+6. Confirm no match, unavailable cache, invalid documents, and line-only TTML are labeled accurately; line-only native lyrics must not be presented as word-synced.
+
+The cache format and path are observations from the cited implementation, not a stable Apple API contract. Cache availability and live playback remain subject to Apple Music version, storefront, track, and whether its lyrics panel has been opened.
