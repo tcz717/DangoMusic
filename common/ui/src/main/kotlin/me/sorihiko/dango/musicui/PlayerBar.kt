@@ -6,6 +6,9 @@ import me.sorihiko.dango.module.impls.music.NeteaseMusicModule
 import me.sorihiko.dango.music.CoverCache
 import me.sorihiko.dango.music.MusicPlayer
 import me.sorihiko.dango.music.MusicScreen
+import me.sorihiko.dango.music.PlaybackView
+import me.sorihiko.dango.music.externalPlaybackStatus
+import me.sorihiko.dango.music.external.ExternalPlayback
 import me.sorihiko.dango.ui.LayoutBounds
 import me.sorihiko.dango.ui.ShapeStyle
 import me.sorihiko.dango.ui.Theme
@@ -41,6 +44,18 @@ internal class PlayerBar(private val screen: MusicScreen, private val module: Ne
     fun draw(bar: LayoutBounds) {
         val ctx = ui.ctx
         ui.card(bar, Theme.CARD, 16f)
+        if (ExternalPlayback.enabled) {
+            val s = PlaybackView.snapshot()
+            val title = s?.title ?: I18n.text("External Player / Apple Music")
+            ui.text(ui.trim(title, bar.width - 30f, 14f, Theme.FONT_SEMIBOLD),
+                bar.x + 15f, bar.y + 12f, 14f, Theme.TEXT_PRIMARY, Theme.FONT_SEMIBOLD)
+            val artist = s?.artist?.takeIf { it.isNotEmpty() }?.let { "$it · " }.orEmpty()
+            ui.text(ui.trim(artist + externalPlaybackStatus(), bar.width - 30f, 11f),
+                bar.x + 15f, bar.y + 34f, 11f, Theme.TEXT_SECONDARY)
+            ui.text(I18n.text("Read-only: control playback in Apple Music. Listen Together is disabled."),
+                bar.x + 15f, bar.y + 51f, 10f, Theme.TEXT_SECONDARY)
+            return
+        }
         val t = MusicPlayer.current
 
         // 左：封面 + 歌名 / 歌手
@@ -174,6 +189,7 @@ internal class PlayerBar(private val screen: MusicScreen, private val module: Ne
 
     /** 点在进度条 / 音量条上就处理掉，返回 true */
     fun mouseDown(mx: Int, my: Int): Boolean {
+        if (ExternalPlayback.enabled) return false
         if (progRect.expand(0f, 6f).contains(mx, my)) {
             val dur = MusicPlayer.durationMs
             if (dur > 0) MusicPlayer.seek(((mx - progRect.x) / progRect.width * dur).toLong())
@@ -188,6 +204,7 @@ internal class PlayerBar(private val screen: MusicScreen, private val module: Ne
 
     /** 按住拖动音量 */
     fun mouseDrag(mx: Int, my: Int) {
+        if (ExternalPlayback.enabled) return
         if (volRect.expand(12f, 12f).contains(mx, my)) setVolumeAt(mx)
     }
 

@@ -13,6 +13,8 @@ import me.sorihiko.dango.module.values.FloatValue
 import me.sorihiko.dango.module.values.IntValue
 import me.sorihiko.dango.module.values.ModuleValue
 import me.sorihiko.dango.music.MusicScreen
+import me.sorihiko.dango.music.externalPlaybackStatus
+import me.sorihiko.dango.music.external.ExternalPlayback
 import me.sorihiko.dango.platform.Keys
 import me.sorihiko.dango.ui.LayoutBounds
 import me.sorihiko.dango.ui.ShapeStyle
@@ -232,7 +234,7 @@ internal class SettingsPage(private val screen: MusicScreen, private val module:
         // 先取走，免得落进下面的 Hotkeys 组
         val updates = player.take(listOf("checkUpdates"))
         val music = listOf(
-            Group("Player", "Playback", player.m, false, player.take(listOf("volume", "language"))),
+            Group("Player", "Playback", player.m, false, player.take(listOf("externalPlayer", "lyricOffset", "volume", "language"))),
             Group("Hotkeys", "Click, then press a key · Backspace clears", player.m, false, player.take()),
             Group("Song card", "Overlay", card.m, true, card.take()),
             nowPlaying,
@@ -252,6 +254,11 @@ internal class SettingsPage(private val screen: MusicScreen, private val module:
         }
 
         var top = page.y + 54f
+        if (ExternalPlayback.enabled) {
+            ui.text(ui.trim(externalPlaybackStatus(), page.width - 12f, 11f),
+                page.x, top, 11f, Theme.TEXT_SECONDARY)
+            top += 22f
+        }
         // 有新版本时在最上面常驻一条（设置里关掉"检查更新"就不显示）
         val update = UpdateChecker.available?.takeIf { module.checkUpdates.get() }
         if (update != null) {

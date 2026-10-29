@@ -19,7 +19,9 @@ import me.sorihiko.dango.module.values.IntValue
 import me.sorihiko.dango.module.values.ModuleValue
 import me.sorihiko.dango.music.CoverArt
 import me.sorihiko.dango.music.MusicPlayer
-import me.sorihiko.dango.music.NeteaseTrack
+import me.sorihiko.dango.music.PlaybackView
+import me.sorihiko.dango.music.external.ExternalPlayback
+import me.sorihiko.dango.music.external.lyricPosition
 
 import java.util.Random
 import java.util.concurrent.ConcurrentHashMap
@@ -120,13 +122,6 @@ class LyricsModule : Module() {
 
     // ---------------------------------------------------------------- 状态
 
-    /** 正在播放的歌（来自内置播放器） */
-    private class NowPlaying(val track: NeteaseTrack, val playing: Boolean) {
-        val key: String get() = track.key
-        val title: String get() = track.name
-        val artist: String get() = track.artists.joinToString(" / ")
-    }
-
     private val cover = CoverArt()
     private val fetcher = Executors.newSingleThreadExecutor { r -> Thread(r, "Dango-Lyrics").apply { isDaemon = true } }
 
@@ -134,7 +129,7 @@ class LyricsModule : Module() {
     private val cache = ConcurrentHashMap<String, Any>()     // key -> Lyrics 或 NotFound
     private val pending = ConcurrentHashMap.newKeySet<String>()
 
-    private var current: NowPlaying? = null
+    private var current: PlaybackView? = null
     private var currentKey: String? = null
     private var songPos = 0.0                 // 毫秒，本地平滑时钟
     private var lastSeenNanos = 0L
@@ -189,18 +184,15 @@ class LyricsModule : Module() {
 
     // ---------------------------------------------------------------- 当前歌曲 / 时钟
 
-    private fun nowPlaying(): NowPlaying? {
-        if (!MusicPlayer.active) return null
-        val t = MusicPlayer.current ?: return null
-        return NowPlaying(t, MusicPlayer.state == MusicPlayer.State.PLAYING)
-    }
+    private fun nowPlaying(): PlaybackView? = PlaybackView.snapshot()
 
     private fun lyricsFor(key: String): Lyrics? = cache[key] as? Lyrics
 
-    private fun requestLyrics(s: NowPlaying) {
+    private fun requestLyrics(s: PlaybackView) {
+        if (s.external) return
+        val track = s.track ?: return
         val key = s.key
         if (cache.containsKey(key) || !pending.add(key)) return
-        val track = s.track
         fetcher.execute {
             try {
                 cache[key] = me.sorihiko.dango.music.MusicSources.api(track.source).lyrics(track) ?: NotFound
@@ -218,21 +210,29 @@ class LyricsModule : Module() {
         val s = nowPlaying()
         if (s == null) {
             // 超过 3 秒没在放歌就清掉
-            if (current != null && (now - lastSeenNanos) / 1e9 > 3.0) {
+            if (current != null && (ExternalPlayback.enabled || current?.external == true || (now - lastSeenNanos) / 1e9 > 3.0)) {
                 current = null
                 currentKey = null
                 active?.let { startFade(it) }
                 active = null
                 lastIndex = -1
+                fading.clear()
+                flash.reset()
+                cover.clear()
             }
             return
         }
         lastSeenNanos = now
-        val p = MusicPlayer.positionMs.toDouble()
+        val offset = DangoMusic.instance.moduleManager.get(NeteaseMusicModule::class.java).lyricOffset.value
+        val p = lyricPosition(s.positionMs, s.durationMs, offset).toDouble()
         if (s.key != currentKey) {
             currentKey = s.key
             songPos = p
-            active?.let { startFade(it) }
+            if (s.external || current?.external == true) {
+                fading.clear()
+                flash.reset()
+                cover.clear()
+            } else active?.let { startFade(it) }
             active = null
             lastIndex = -1
             requestLyrics(s)
@@ -249,7 +249,7 @@ class LyricsModule : Module() {
     fun renderMainMenu() {
         if (!DangoClient.platform.inMainMenu) return
         val s = nowPlaying() ?: return
-        s.track.coverUrl.takeIf { it.isNotEmpty() }?.let { cover.requestUrl(s.key, it) }
+        s.track?.coverUrl?.takeIf { it.isNotEmpty() }?.let { cover.requestUrl(s.key, it) }
         DangoClient.gfx.guarded {
             cover.upload()
             drawNowPlaying(s, null)
@@ -263,7 +263,7 @@ class LyricsModule : Module() {
         val s = current
         // 小柱子的颜色取自封面，所以只开 Now playing 也要加载封面
         if (s != null && (showCover.get() || nowPlaying.get())) {
-            s.track.coverUrl.takeIf { it.isNotEmpty() }?.let { cover.requestUrl(s.key, it) }
+            s.track?.coverUrl?.takeIf { it.isNotEmpty() }?.let { cover.requestUrl(s.key, it) }
         }
         cover.upload()
         // 拆句开关变了：歌词行的下标都变了，重新找当前这句
@@ -271,7 +271,7 @@ class LyricsModule : Module() {
             LyricSplit.enabled = splitLines.get()
             lastIndex = -1
         }
-        val lyrics = currentKey?.let { lyricsFor(it) }
+        val lyrics = if (s?.external == true) s.lyrics else currentKey?.let { lyricsFor(it) }
         val paused = s != null && !s.playing
         if (s != null && lyrics != null) {
             val pos = songPos.toLong()
@@ -304,7 +304,7 @@ class LyricsModule : Module() {
         val deepGlow = gfx.glow
         gfx.guarded {
             val songNow = songPos.toLong()
-            val beat = if (s != null) MusicPlayer.beatPulse(MusicPlayer.positionMs) else 0f
+            val beat = if (s != null && !s.external) MusicPlayer.beatPulse(s.positionMs) else 0f
             if (!worldMode.get()) {
                 // 3D lyrics 关掉 = 不显示歌词
             } else if (textFlash.get()) {
@@ -766,7 +766,7 @@ class LyricsModule : Module() {
         false
     }
 
-    private fun drawNowPlaying(s: NowPlaying, lyrics: Lyrics?) {
+    private fun drawNowPlaying(s: PlaybackView, lyrics: Lyrics?) {
         val hud = DangoClient.gfx.hud
         hud.begin()
         val x = 6

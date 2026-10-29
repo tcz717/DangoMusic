@@ -1,0 +1,214 @@
+package me.sorihiko.dango.music.external
+
+import me.sorihiko.dango.music.MusicSourceApi
+import me.sorihiko.dango.music.MusicSources
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+
+/**
+ * Read-only Apple Music companion. It never starts local audio or requests a playable song URL.
+ * Enabling starts polling; disabling/stop clears metadata immediately. Unsupported systems do no I/O.
+ */
+object ExternalPlayback {
+    private val matches = ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue<Runnable>(1),
+        { r -> Thread(r, "Dango-AppleMusic-Lyrics").apply { isDaemon = true } },
+        ThreadPoolExecutor.DiscardOldestPolicy())
+    private val engine = ExternalEngine(SystemExternalClock, matches, { MusicSources.api() },
+        nativeLyrics = AppleNativeLyricsResolver())
+    private var worker: ScheduledExecutorService? = null
+    private var provider: ExternalSessionProvider? = null
+    private var epoch = 0L
+
+    init {
+        try {
+            Runtime.getRuntime().addShutdownHook(Thread({ stop() }, "Dango-AppleMusic-Shutdown"))
+        } catch (_: IllegalStateException) {
+        } catch (_: SecurityException) {
+        }
+    }
+
+    @set:Synchronized
+    @Volatile var enabled = false
+        set(value) {
+            field = value
+            if (value) start() else stop()
+        }
+
+    @Synchronized fun start() {
+        if (!enabled || worker != null) return
+        if (!WindowsSessionProvider.supported()) {
+            engine.reset(ExternalStatus.UNSUPPORTED)
+            return
+        }
+        val generation = ++epoch
+        val sessionProvider = WindowsSessionProvider()
+        provider = sessionProvider
+        engine.reset(ExternalStatus.DISCONNECTED)
+        worker = Executors.newSingleThreadScheduledExecutor { r ->
+            Thread(r, "Dango-AppleMusic-Poll").apply { isDaemon = true }
+        }.also { executor ->
+            executor.scheduleWithFixedDelay({
+                val value = sessionProvider.poll()
+                synchronized(this) {
+                    if (generation == epoch && enabled) {
+                        val failure = sessionProvider.failure
+                        if (failure != null) engine.reset(failure) else engine.accept(value)
+                    }
+                }
+            }, 0, 500, TimeUnit.MILLISECONDS)
+        }
+    }
+
+    @Synchronized fun stop() {
+        epoch++
+        provider?.close()
+        provider = null
+        worker?.shutdownNow()
+        worker = null
+        matches.queue.clear()
+        engine.reset(ExternalStatus.DISABLED)
+    }
+
+    val snapshot: ExternalSnapshot get() = snapshot()
+    fun snapshot(): ExternalSnapshot = engine.snapshot()
+    fun lyricPosition(positionMs: Long, durationMs: Long, offsetMs: Int): Long =
+        me.sorihiko.dango.music.external.lyricPosition(positionMs, durationMs, offsetMs)
+}
+
+/** Serialized publication, with generation checks across session, track, provider and lifecycle changes. */
+internal class ExternalEngine(
+    private val clock: ExternalClock,
+    private val executor: Executor,
+    private val api: () -> MusicSourceApi,
+    private val matcher: ExternalMatcher = ExternalMatcher(clock),
+    private val nativeLyrics: AppleNativeLyricsProvider = object : AppleNativeLyricsProvider {
+        override fun resolve(sample: ExternalSample, active: () -> Boolean) =
+            AppleNativeLyricsResult(AppleNativeLyricsStatus.UNSUPPORTED)
+    },
+) {
+    private val timeline = ExternalTimeline(clock)
+    private var status = ExternalStatus.DISCONNECTED
+    private var identity: List<String>? = null
+    private var generation = 0L
+    private var match: ExternalMatch? = null
+    private var nativeResult = AppleNativeLyricsResult()
+    private var pendingToken: Long? = null
+    private var nextNativeCheckNs = 0L
+    private var lastSample: ExternalSample? = null
+    private var lastSampleNs = 0L
+
+    @Synchronized fun reset(value: ExternalStatus) {
+        generation++
+        identity = null
+        match = null
+        nativeResult = AppleNativeLyricsResult()
+        pendingToken = null
+        nextNativeCheckNs = 0L
+        lastSample = null
+        lastSampleNs = 0L
+        timeline.accept(null)
+        status = value
+    }
+
+    @Synchronized fun accept(sample: ExternalSample?) {
+        if (!timeline.accept(sample) || sample == null) {
+            reset(ExternalStatus.DISCONNECTED)
+            return
+        }
+        status = sample.status
+        val source = api()
+        val key = sample.identity() + source.source.key
+        val changed = key != identity
+        val nowNs = clock.nanoTime()
+        val lifecycleChanged = !changed && isLifecycleChange(lastSample, sample, nowNs - lastSampleNs)
+        if (changed) {
+            generation++
+            pendingToken = null
+            identity = key
+            match = null
+            nativeResult = AppleNativeLyricsResult()
+            nextNativeCheckNs = 0L
+        }
+        lastSample = sample
+        lastSampleNs = nowNs
+        if (lifecycleChanged) {
+            generation++
+            pendingToken = null
+        }
+        if (pendingToken != null) return
+        val checkNative = changed || lifecycleChanged || clock.nanoTime() >= nextNativeCheckNs
+        val resolveFallback = changed || lifecycleChanged || matcher.retryDue(sample, source.source)
+        if (!checkNative && !resolveFallback) return
+        val token = ++generation
+        pendingToken = token
+        if (checkNative) nextNativeCheckNs = clock.nanoTime() + NATIVE_RETRY_NS
+        val previousMatch = match
+        val previousNative = nativeResult
+        executor.execute {
+            var publishedNative = previousNative
+            var publishedMatch = previousMatch
+            try {
+                val resolvedNative = if (checkNative) {
+                    try {
+                        nativeLyrics.resolve(sample) {
+                            synchronized(this) { generation == token && identity == key }
+                        }
+                    } catch (_: Exception) {
+                        AppleNativeLyricsResult(AppleNativeLyricsStatus.INVALID)
+                    }
+                } else previousNative
+                publishedNative = if (resolvedNative.lyrics != null || previousNative.lyrics == null)
+                    resolvedNative else previousNative
+                if (publishedNative.lyrics == null && resolveFallback) {
+                    publishedMatch = matcher.resolve(sample, source) {
+                        synchronized(this) { generation == token && identity == key }
+                    }
+                }
+            } catch (_: Exception) {
+                if (publishedNative.lyrics == null) {
+                    publishedNative = AppleNativeLyricsResult(
+                        AppleNativeLyricsStatus.INVALID,
+                        diagnostics = publishedNative.diagnostics,
+                    )
+                }
+            } finally {
+                synchronized(this) {
+                    if (generation == token && identity == key) {
+                        nativeResult = publishedNative
+                        match = publishedMatch
+                        if (publishedNative.status == AppleNativeLyricsStatus.UNSUPPORTED) {
+                            nextNativeCheckNs = Long.MAX_VALUE
+                        }
+                        pendingToken = null
+                    }
+                }
+            }
+        }
+    }
+
+    @Synchronized fun snapshot(): ExternalSnapshot =
+        if (status in listOf(ExternalStatus.DISABLED, ExternalStatus.UNSUPPORTED,
+                ExternalStatus.HELPER_MISSING, ExternalStatus.DISCONNECTED))
+            ExternalSnapshot(status)
+        else timeline.snapshot(match, nativeResult)
+
+    private fun isLifecycleChange(previous: ExternalSample?, current: ExternalSample, elapsedNs: Long): Boolean {
+        if (previous == null || previous.identity() != current.identity()) return false
+        if (previous.status != current.status) return true
+        val elapsed = elapsedNs.coerceAtLeast(0L) / 1_000_000L
+        if (elapsed > SEEK_DETECTION_WINDOW_MS) return false
+        val expected = previous.positionMs +
+            if (previous.status == ExternalStatus.PLAYING) (elapsed * previous.playbackRate).toLong() else 0L
+        return kotlin.math.abs(current.positionMs - expected) > SEEK_DISCONTINUITY_MS
+    }
+
+    companion object {
+        private const val NATIVE_RETRY_NS = 5_000_000_000L
+        private const val SEEK_DISCONTINUITY_MS = 1_500L
+        private const val SEEK_DETECTION_WINDOW_MS = 2_000L
+    }
+}

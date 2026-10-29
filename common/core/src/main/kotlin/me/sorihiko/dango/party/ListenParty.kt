@@ -7,6 +7,7 @@ import me.sorihiko.dango.DangoMusic
 import me.sorihiko.dango.music.MusicPlayer
 import me.sorihiko.dango.music.NeteaseTrack
 import me.sorihiko.dango.music.MusicSource
+import me.sorihiko.dango.music.external.ExternalPlayback
 
 import java.security.SecureRandom
 import java.util.concurrent.Executors
@@ -125,6 +126,10 @@ object ListenParty {
     // ---------------------------------------------------------------- 开房 / 加入 / 离开
 
     fun create() {
+        if (ExternalPlayback.enabled) {
+            status = "Turn off External Player before using Listen Together."
+            return
+        }
         if (busy || role != Role.NONE) return
         busy = true
         status = "正在创建房间…"
@@ -179,6 +184,10 @@ object ListenParty {
     }
 
     fun join(input: String) {
+        if (ExternalPlayback.enabled) {
+            status = "Turn off External Player before using Listen Together."
+            return
+        }
         val c = input.trim().uppercase()
         if (busy || role != Role.NONE || c.isEmpty()) return
         busy = true
@@ -350,6 +359,7 @@ object ListenParty {
     // ---------------------------------------------------------------- 房主：把自己的播放状态发出去
 
     private fun hostTick() {
+        if (ExternalPlayback.enabled) return
         val cur = MusicPlayer.current ?: return
         if (!supportsSource(cur.source)) return
         val st = MusicPlayer.state
@@ -386,6 +396,7 @@ object ListenParty {
         s.pos + if (s.playing) (transport.serverNow() - s.at).coerceAtLeast(0L) else 0L
 
     private fun followTick() {
+        if (ExternalPlayback.enabled) return
         val s = remote ?: return
         val cur = MusicPlayer.current
         if (cur?.key != s.track.key || (MusicPlayer.state == MusicPlayer.State.ERROR && requestedKey != s.track.key)) {
