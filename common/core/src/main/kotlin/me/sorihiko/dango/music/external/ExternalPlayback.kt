@@ -83,18 +83,20 @@ internal class ExternalEngine(
     clock: ExternalClock,
     private val executor: Executor,
     private val api: () -> MusicSourceApi,
-    private val matcher: ExternalMatcher = ExternalMatcher(),
+    private val matcher: ExternalMatcher = ExternalMatcher(clock),
 ) {
     private val timeline = ExternalTimeline(clock)
     private var status = ExternalStatus.DISCONNECTED
     private var identity: List<String>? = null
     private var generation = 0L
     private var match: ExternalMatch? = null
+    private var pendingToken: Long? = null
 
     @Synchronized fun reset(value: ExternalStatus) {
         generation++
         identity = null
         match = null
+        pendingToken = null
         timeline.accept(null)
         status = value
     }
@@ -107,16 +109,23 @@ internal class ExternalEngine(
         status = sample.status
         val source = api()
         val key = sample.identity() + source.source.key
-        if (key == identity) return
+        if (key == identity) {
+            if (pendingToken != null || !matcher.retryDue(sample, source.source)) return
+        } else {
+            identity = key
+            match = null
+        }
         val token = ++generation
-        identity = key
-        match = null
+        pendingToken = token
         executor.execute {
             val result = matcher.resolve(sample, source) {
                 synchronized(this) { generation == token && identity == key }
             }
             synchronized(this) {
-                if (generation == token && identity == key) match = result
+                if (generation == token && identity == key) {
+                    match = result
+                    pendingToken = null
+                }
             }
         }
     }

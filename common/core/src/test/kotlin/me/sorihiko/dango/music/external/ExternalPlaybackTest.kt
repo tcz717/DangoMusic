@@ -307,11 +307,20 @@ class ExternalPlaybackTest {
         assertEquals(8_000L, lyricPosition(10_000, 20_000, -2_000))
         assertEquals(0L, lyricPosition(1_000, 20_000, -2_000))
         assertEquals(20_000L, lyricPosition(19_000, 20_000, 2_000))
-        assertEquals(0L, lyricPosition(1_000, 0, 0))
-        assertEquals(0L, lyricPosition(1_000, -1, 0))
+        assertEquals(1_000L, lyricPosition(1_000, 0, 0))
+        assertEquals(1_000L, lyricPosition(1_000, -1, 0))
         assertEquals(20_000L, lyricPosition(Long.MAX_VALUE, 20_000, 1))
         assertEquals(0L, lyricPosition(Long.MIN_VALUE, 20_000, -1))
         assertEquals(12_000L, ExternalPlayback.lyricPosition(10_000, 20_000, 2_000))
+    }
+
+    @Test fun unknownDurationPreservesAdvancingPositionAndOffset() {
+        assertEquals(12_000L, lyricPosition(10_000, 0, 2_000))
+        assertEquals(13_000L, lyricPosition(11_000, 0, 2_000))
+        assertEquals(8_000L, lyricPosition(10_000, 0, -2_000))
+        assertEquals(0L, lyricPosition(1_000, 0, -2_000))
+        assertEquals(Long.MAX_VALUE, lyricPosition(Long.MAX_VALUE, 0, 2_000))
+        assertEquals(0L, lyricPosition(Long.MIN_VALUE, 0, -2_000))
     }
 
     @Test fun snapshotKeyTracksSessionAndSongButNotPlaybackPosition() {
@@ -411,5 +420,95 @@ class ExternalPlaybackTest {
         clock.advance(1_001)
         assertEquals(ExternalStatus.DISCONNECTED, timeline.snapshot(null).status)
         assertFalse(timeline.accept(paused.copy(capturedAtUnixMs = clock.wall, updatedAtUnixMs = 0)))
+    }
+
+    @Test fun searchExceptionsRetryAfterMonotonicDeadlineWithoutPerPollJobs() {
+        val clock = Clock()
+        val tasks = Tasks()
+        var searches = 0
+        val source = object : MusicSourceApi {
+            override val source = MusicSource.NETEASE
+            override fun search(query: String): List<NeteaseTrack> {
+                searches++
+                if (searches == 1) error("Offline")
+                return listOf(track())
+            }
+            override fun lyrics(track: NeteaseTrack) = Lyrics(listOf(LyricLine(0, "lyrics")), "fake")
+            override fun songUrl(track: NeteaseTrack): NeteaseApi.SongUrl? = error("audio")
+        }
+        val engine = ExternalEngine(clock, tasks, { source })
+        engine.accept(sample(clock))
+        repeat(20) { engine.accept(sample(clock)) }
+        assertEquals(1, tasks.queue.size)
+        tasks.run()
+        assertEquals(1, searches)
+        assertNull(engine.snapshot().lyrics)
+        clock.wall += 1_000_000 // wall jumps cannot bypass the retry backoff
+        repeat(20) { engine.accept(sample(clock)) }
+        assertTrue(tasks.queue.isEmpty())
+        clock.advance(29_999)
+        engine.accept(sample(clock))
+        assertTrue(tasks.queue.isEmpty())
+        clock.advance(1)
+        repeat(20) { engine.accept(sample(clock)) }
+        assertEquals(1, tasks.queue.size)
+        assertEquals(1, searches)
+        tasks.run()
+        assertEquals(2, searches)
+        assertNotNull(engine.snapshot().lyrics)
+        clock.advance(60_000)
+        engine.accept(sample(clock))
+        assertTrue(tasks.queue.isEmpty())
+        assertEquals(2, searches)
+    }
+
+    @Test fun nullLyricsRetryAndDisableReenableCannotPermanentlyPoisonCache() {
+        val clock = Clock()
+        val tasks = Tasks()
+        var searches = 0
+        var lyricRequests = 0
+        val source = object : MusicSourceApi {
+            override val source = MusicSource.NETEASE
+            override fun search(query: String): List<NeteaseTrack> { searches++; return listOf(track()) }
+            override fun lyrics(track: NeteaseTrack): Lyrics? {
+                lyricRequests++
+                return if (lyricRequests == 1) null else Lyrics(listOf(LyricLine(0, "lyrics")), "fake")
+            }
+            override fun songUrl(track: NeteaseTrack): NeteaseApi.SongUrl? = error("audio")
+        }
+        val engine = ExternalEngine(clock, tasks, { source })
+        engine.accept(sample(clock))
+        tasks.run()
+        assertNotNull(engine.snapshot().track)
+        assertNull(engine.snapshot().lyrics)
+        engine.reset(ExternalStatus.DISABLED)
+        engine.accept(sample(clock))
+        tasks.run() // cached miss: toggling does not hammer the provider
+        assertEquals(1, searches)
+        repeat(20) { engine.accept(sample(clock)) }
+        assertTrue(tasks.queue.isEmpty())
+        clock.advance(30_000)
+        repeat(20) { engine.accept(sample(clock)) }
+        assertEquals(1, tasks.queue.size)
+        tasks.run()
+        assertEquals(2, searches)
+        assertEquals(2, lyricRequests)
+        assertNotNull(engine.snapshot().lyrics)
+    }
+
+    @Test fun unsuccessfulCandidateLookupExpiresButRemainsBoundedBetweenPolls() {
+        val clock = Clock()
+        val source = Source()
+        val matcher = ExternalMatcher(clock)
+        assertNull(matcher.resolve(sample(clock), source))
+        assertFalse(matcher.retryDue(sample(clock), source.source))
+        repeat(20) { assertNull(matcher.resolve(sample(clock), source)) }
+        assertEquals(1, source.searches)
+        clock.advance(30_000)
+        assertTrue(matcher.retryDue(sample(clock), source.source))
+        source.candidates = listOf(track())
+        assertNotNull(matcher.resolve(sample(clock), source)?.lyrics)
+        assertEquals(2, source.searches)
+        assertFalse(matcher.retryDue(sample(clock), source.source))
     }
 }

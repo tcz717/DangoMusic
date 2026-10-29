@@ -23,8 +23,10 @@ data class PlaybackView(
             if (ExternalPlayback.enabled) {
                 val s = ExternalPlayback.snapshot
                 if (!s.active) return null
-                return PlaybackView(s.key, s.title, s.artists, s.status == ExternalStatus.PLAYING,
-                    s.positionMs, s.durationMs, s.track, true, s.lyrics)
+                val track = s.track
+                val key = "${s.key}|lyrics:${track?.key.orEmpty()}"
+                return PlaybackView(key, s.title, s.artists, s.status == ExternalStatus.PLAYING,
+                    s.positionMs, s.durationMs, track, true, s.lyrics)
             }
             val s = MusicPlayer.snapshot() ?: return null
             return PlaybackView(s.track.key, s.track.name, s.track.artists,

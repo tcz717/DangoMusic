@@ -95,7 +95,12 @@ internal class WindowsSessionProvider(
                 isolated.toFile().deleteOnExit()
                 val target = isolated.resolve("dango-apple-music.exe")
                 target.toFile().deleteOnExit()
-                Files.copy(input, target)
+                try {
+                    Files.copy(input, target)
+                } catch (e: Exception) {
+                    cleanup()
+                    throw e
+                }
                 if (closed) { cleanup(); return null }
                 return target.toFile()
             }

@@ -14,6 +14,7 @@ import java.util.Locale
 internal class ExternalMatch(track: NeteaseTrack, lyrics: Lyrics?) {
     private val track = copy(track)
     private val storedLyrics = lyrics?.takeIf { bounded(it.lines) }
+    val hasLyrics: Boolean get() = storedLyrics != null
     val lyrics: Lyrics? get() = storedLyrics?.let(::copyLyrics)
 
     private fun copyLyrics(original: Lyrics): Lyrics? {
@@ -36,16 +37,26 @@ internal class ExternalMatch(track: NeteaseTrack, lyrics: Lyrics?) {
 }
 
 /** Intentionally prefers no lyrics over lyrics from a different recording. */
-internal class ExternalMatcher {
+internal class ExternalMatcher(private val clock: ExternalClock = SystemExternalClock) {
     private data class Key(val source: MusicSource, val title: String, val artists: List<String>, val duration: Long)
-    private val cache = object : LinkedHashMap<Key, ExternalMatch?>(32, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Key, ExternalMatch?>?) = size > 64
+    private data class CacheEntry(val result: ExternalMatch?, val resolvedNs: Long) {
+        fun expired(nowNs: Long) = result?.hasLyrics != true && nowNs - resolvedNs >= 30_000_000_000L
+    }
+    private val cache = object : LinkedHashMap<Key, CacheEntry>(32, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Key, CacheEntry>?) = size > 64
+    }
+
+    fun retryDue(sample: ExternalSample, source: MusicSource): Boolean = synchronized(cache) {
+        cache[Key(source, sample.title, sample.artists, sample.durationMs)]?.expired(clock.nanoTime()) ?: true
     }
 
     fun resolve(sample: ExternalSample, api: MusicSourceApi, active: () -> Boolean = { true }): ExternalMatch? {
         if (!active()) return null
         val key = Key(api.source, sample.title, sample.artists.toList(), sample.durationMs)
-        synchronized(cache) { if (cache.containsKey(key)) return cache[key] }
+        synchronized(cache) {
+            val cached = cache[key]
+            if (cached != null && !cached.expired(clock.nanoTime())) return cached.result
+        }
         val result = try {
             if (sample.title.length > 300 || sample.artists.isEmpty() || sample.artists.size > 12 ||
                 sample.artists.any { it.isBlank() || it.length > 200 } || sample.durationMs <= 0) null
@@ -60,7 +71,7 @@ internal class ExternalMatcher {
             }
         } catch (_: Exception) { null }
         if (!active()) return null
-        synchronized(cache) { cache[key] = result }
+        synchronized(cache) { cache[key] = CacheEntry(result, clock.nanoTime()) }
         return result
     }
 

@@ -28,7 +28,7 @@ class ExternalSnapshot internal constructor(
     val active: Boolean get() = status == ExternalStatus.PLAYING || status == ExternalStatus.PAUSED
 }
 
-/** Positive offsets show lyrics earlier; saturating arithmetic also handles untrusted positions. */
+/** Positive offsets show lyrics earlier. Unknown durations have no upper clamp; arithmetic saturates. */
 fun lyricPosition(positionMs: Long, durationMs: Long, offsetMs: Int): Long {
     val offset = offsetMs.toLong()
     val adjusted = when {
@@ -36,7 +36,7 @@ fun lyricPosition(positionMs: Long, durationMs: Long, offsetMs: Int): Long {
         offset < 0 && positionMs < Long.MIN_VALUE - offset -> Long.MIN_VALUE
         else -> positionMs + offset
     }
-    return adjusted.coerceIn(0L, durationMs.coerceAtLeast(0L))
+    return adjusted.coerceIn(0L, durationMs.takeIf { it > 0 } ?: Long.MAX_VALUE)
 }
 
 internal interface ExternalClock {

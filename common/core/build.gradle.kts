@@ -3,5 +3,5 @@ dependencies {
     "implementation"("javazoom:jlayer:1.0.1")       // MP3 解码
     "implementation"("com.google.zxing:core:3.3.3") // 登录二维码
     "testImplementation"("junit:junit:4.13.2")
-    "testImplementation"("com.google.code.gson:gson:2.2.4")
+    "testImplementation"("com.google.code.gson:gson:2.8.9")
 }
