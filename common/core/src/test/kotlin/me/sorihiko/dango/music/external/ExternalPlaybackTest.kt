@@ -1,0 +1,355 @@
+package me.sorihiko.dango.music.external
+
+import me.sorihiko.dango.lyrics.LyricLine
+import me.sorihiko.dango.lyrics.LyricSplit
+import me.sorihiko.dango.lyrics.Lyrics
+import me.sorihiko.dango.music.MusicSource
+import me.sorihiko.dango.music.MusicSourceApi
+import me.sorihiko.dango.music.NeteaseApi
+import me.sorihiko.dango.music.NeteaseTrack
+import org.junit.Assert.*
+import org.junit.Test
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.Executor
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+
+class ExternalPlaybackTest {
+    private class Clock : ExternalClock {
+        var wall = 1_800_000_000_000L
+        var nano = 0L
+        override fun nanoTime() = nano
+        override fun unixMs() = wall
+        fun advance(ms: Long) { wall += ms; nano += ms * 1_000_000 }
+    }
+
+    private class Tasks : Executor {
+        val queue = mutableListOf<Runnable>()
+        override fun execute(command: Runnable) { queue += command }
+        fun run(index: Int = 0) { queue.removeAt(index).run() }
+    }
+
+    private class Source : MusicSourceApi {
+        override val source = MusicSource.NETEASE
+        var candidates = emptyList<NeteaseTrack>()
+        var searches = 0
+        var lyricRequests = 0
+        override fun search(query: String): List<NeteaseTrack> { searches++; return candidates }
+        override fun lyrics(track: NeteaseTrack): Lyrics {
+            lyricRequests++
+            return Lyrics(listOf(LyricLine(0, track.name)), "fake")
+        }
+        override fun songUrl(track: NeteaseTrack): NeteaseApi.SongUrl? = error("Must never request audio")
+    }
+
+    private fun sample(clock: Clock, title: String = "Song", session: String = "apple:1",
+                       position: Long = 10_000, status: ExternalStatus = ExternalStatus.PLAYING,
+                       rate: Double = 1.0, age: Long = 0) =
+        ExternalSample(session, title, listOf("Artist"), "Album", 200_000, position,
+            clock.wall - age, clock.wall, rate, status)
+    private fun track(name: String = "Song", id: Long = 1, duration: Long = 200_000,
+                      artists: List<String> = listOf("Artist")) =
+        NeteaseTrack(id, name, artists, duration, "cover")
+
+    @Test fun anchorsRateMonotonicAndClamping() {
+        val clock = Clock()
+        val timeline = ExternalTimeline(clock)
+        assertTrue(timeline.accept(sample(clock, age = 2_000, rate = 1.5)))
+        assertEquals(13_000L, timeline.snapshot(null).positionMs)
+        clock.advance(1_000)
+        clock.wall -= 90_000 // wall-clock corrections do not change extrapolation
+        assertEquals(14_500L, timeline.snapshot(null).positionMs)
+        clock.wall += 90_000
+        timeline.accept(sample(clock, position = 199_000, rate = 2.0))
+        clock.advance(2_000)
+        assertEquals(200_000L, timeline.snapshot(null).positionMs)
+        timeline.accept(sample(clock, position = -100, status = ExternalStatus.PAUSED))
+        assertEquals(0L, timeline.snapshot(null).positionMs)
+    }
+
+    @Test fun pauseResumeAndSeekBothDirections() {
+        val clock = Clock()
+        val timeline = ExternalTimeline(clock)
+        timeline.accept(sample(clock))
+        clock.advance(1_000)
+        assertEquals(11_000L, timeline.snapshot(null).positionMs)
+        timeline.accept(sample(clock, position = 11_000, status = ExternalStatus.PAUSED, age = 80_000))
+        clock.advance(2_000)
+        assertEquals(11_000L, timeline.snapshot(null).positionMs)
+        timeline.accept(sample(clock, position = 70_000))
+        assertEquals(70_000L, timeline.snapshot(null).positionMs)
+        timeline.accept(sample(clock, position = 3_000))
+        clock.advance(500)
+        assertEquals(3_500L, timeline.snapshot(null).positionMs)
+    }
+
+    @Test fun invalidAnchorsDoNotInventElapsedTimeAndStaleFeedDisconnects() {
+        val clock = Clock()
+        val timeline = ExternalTimeline(clock)
+        timeline.accept(sample(clock).copy(updatedAtUnixMs = 0))
+        clock.advance(1_000)
+        assertEquals(10_000L, timeline.snapshot(null).positionMs)
+        timeline.accept(sample(clock, age = -500))
+        clock.advance(1_000)
+        assertEquals(10_000L, timeline.snapshot(null).positionMs)
+        timeline.accept(sample(clock, rate = Double.NaN))
+        clock.advance(1_000)
+        assertEquals(10_000L, timeline.snapshot(null).positionMs)
+        clock.advance(5_001)
+        assertEquals(ExternalStatus.DISCONNECTED, timeline.snapshot(null).status)
+        assertNull(timeline.snapshot(null).track)
+        timeline.accept(sample(clock))
+        assertEquals(ExternalStatus.PLAYING, timeline.snapshot(null).status)
+        assertFalse(timeline.accept(sample(clock).copy(capturedAtUnixMs = clock.wall - 20_000)))
+        assertEquals(ExternalStatus.DISCONNECTED, timeline.snapshot(null).status)
+    }
+
+    @Test fun rejectsWrongVersionsArtistsDurationUnknownAndAmbiguity() {
+        val clock = Clock()
+        val matcher = ExternalMatcher()
+        val s = sample(clock)
+        assertTrue(matcher.matches(s, track(name = "Ｓｏｎｇ")))
+        assertFalse(matcher.matches(s, track(name = "Song (Live)")))
+        assertFalse(matcher.matches(s, track(artists = listOf("Other"))))
+        assertFalse(matcher.matches(s, track(duration = 220_000)))
+        assertFalse(matcher.matches(s, track(duration = 0)))
+        val api = Source()
+        api.candidates = listOf(track(), track(id = 2))
+        assertNull(matcher.resolve(s, api))
+        assertEquals(0, api.lyricRequests)
+        api.candidates = listOf(track())
+        assertNull(matcher.resolve(s, api)) // cached rejection
+        assertEquals(1, api.searches)
+    }
+
+    @Test fun scansOnlyBoundedCandidatesAndCacheIsBounded() {
+        val clock = Clock()
+        val matcher = ExternalMatcher()
+        val api = Source()
+        api.candidates = (1..40).map { track("Wrong", it.toLong()) } + track()
+        assertNull(matcher.resolve(sample(clock), api))
+        api.candidates = emptyList()
+        repeat(70) { matcher.resolve(sample(clock, title = "Other $it"), api) }
+        matcher.resolve(sample(clock), api)
+        assertEquals(72, api.searches)
+    }
+
+    @Test fun lateMatchesCannotCrossTracksSessionsDisconnectsOrStops() {
+        val clock = Clock()
+        val tasks = Tasks()
+        val api = Source()
+        val engine = ExternalEngine(clock, tasks, { api })
+        api.candidates = listOf(track(), track("New", 2))
+        engine.accept(sample(clock))
+        engine.accept(sample(clock, title = "New"))
+        tasks.run(1)
+        assertEquals("New", engine.snapshot().track?.name)
+        tasks.run()
+        assertEquals("New", engine.snapshot().track?.name)
+        engine.accept(sample(clock, session = "apple:2"))
+        assertNull(engine.snapshot().track)
+        assertEquals("apple:2", engine.snapshot().sessionId)
+        engine.accept(null)
+        tasks.run()
+        assertEquals(ExternalStatus.DISCONNECTED, engine.snapshot().status)
+        engine.accept(sample(clock))
+        engine.reset(ExternalStatus.DISABLED)
+        tasks.run()
+        assertNull(engine.snapshot().track)
+        assertEquals(ExternalStatus.DISABLED, engine.snapshot().status)
+        engine.accept(sample(clock))
+        tasks.run()
+        assertEquals("Song", engine.snapshot().track?.name)
+    }
+
+    @Test fun metadataPublishesBeforeMatchingAndSnapshotsDoNotChange() {
+        val clock = Clock()
+        val tasks = Tasks()
+        val api = Source().apply { candidates = listOf(track()) }
+        val engine = ExternalEngine(clock, tasks, { api })
+        engine.accept(sample(clock))
+        val before = engine.snapshot()
+        assertEquals("Song", before.title)
+        assertNull(before.track)
+        tasks.run()
+        val after = engine.snapshot()
+        assertEquals("Song", after.track?.name)
+        assertNotNull(after.lyrics)
+        after.track!!.coverUrl = "changed"
+        assertEquals("cover", after.track!!.coverUrl)
+        clock.advance(1_000)
+        assertEquals(10_000L, before.positionMs)
+        assertEquals(11_000L, engine.snapshot().positionMs)
+        assertEquals(0f, after.energy)
+        try {
+            (after.artists as MutableList).add("changed")
+            fail("artists must be immutable")
+        } catch (_: UnsupportedOperationException) { }
+    }
+
+    @Test fun sourceChangesInvalidatePendingMatches() {
+        val clock = Clock()
+        val tasks = Tasks()
+        val first = Source().apply { candidates = listOf(track()) }
+        val second = object : MusicSourceApi {
+            override val source = MusicSource.QQ
+            override fun search(query: String) = emptyList<NeteaseTrack>()
+            override fun lyrics(track: NeteaseTrack): Lyrics? = null
+            override fun songUrl(track: NeteaseTrack): NeteaseApi.SongUrl? = error("audio")
+        }
+        var selected: MusicSourceApi = first
+        val engine = ExternalEngine(clock, tasks, { selected })
+        engine.accept(sample(clock))
+        selected = second
+        engine.accept(sample(clock))
+        tasks.run()
+        assertNull(engine.snapshot().track)
+        tasks.run()
+        assertNull(engine.snapshot().track)
+    }
+
+    @Test fun parsesOnlyValidProtocolAndUnsupportedPlatformIsLazy() {
+        assertNull(WindowsSessionProvider.parse("""{"available":false}"""))
+        assertNull(WindowsSessionProvider.parse("not json"))
+        assertNull(WindowsSessionProvider.parse("""{"available":true,"state":"buffering"}"""))
+        val json = """{"available":true,"sessionId":"apple:1","title":"Song","artists":["Artist"],
+            "album":"Album","durationMs":200000,"positionMs":10000,"updatedAtUnixMs":1800000000000,
+            "capturedAtUnixMs":1800000000000,"playbackRate":1,"state":"playing"}"""
+        assertEquals("Song", WindowsSessionProvider.parse(json)?.title)
+        val oldOs = System.getProperty("os.name")
+        try {
+            System.setProperty("os.name", "Linux")
+            ExternalPlayback.enabled = true
+            assertEquals(ExternalStatus.UNSUPPORTED, ExternalPlayback.snapshot.status)
+            ExternalPlayback.enabled = false
+            assertEquals(ExternalStatus.DISABLED, ExternalPlayback.snapshot.status)
+        } finally {
+            System.setProperty("os.name", oldOs)
+            ExternalPlayback.enabled = false
+        }
+    }
+
+    private class Child(output: String, private val finishes: Boolean = true) : Process() {
+        private val input = ByteArrayInputStream(output.toByteArray(Charsets.UTF_8))
+        var destroyed = false
+        var timeoutMs = 0L
+        override fun getInputStream() = input
+        override fun getErrorStream() = ByteArrayInputStream(byteArrayOf())
+        override fun getOutputStream() = ByteArrayOutputStream()
+        override fun waitFor() = 0
+        override fun waitFor(timeout: Long, unit: TimeUnit): Boolean {
+            timeoutMs = unit.toMillis(timeout)
+            return finishes
+        }
+        override fun exitValue() = 0
+        override fun isAlive() = !finishes && !destroyed
+        override fun destroy() { destroyed = true }
+        override fun destroyForcibly(): Process { destroyed = true; return this }
+    }
+
+    @Test fun helperTimeoutOutputBoundAndShutdown() {
+        val timeout = Child("""{"available":false}""", finishes = false)
+        val timed = WindowsSessionProvider { timeout }
+        assertNull(timed.poll())
+        assertTrue(timeout.destroyed)
+        assertEquals(2_000L, timeout.timeoutMs)
+        val oversized = Child("x".repeat(70_000))
+        assertNull(WindowsSessionProvider { oversized }.poll())
+        assertTrue(oversized.destroyed)
+        var launches = 0
+        val closed = WindowsSessionProvider { launches++; Child("""{"available":false}""") }
+        closed.close()
+        assertNull(closed.poll())
+        assertEquals(0, launches)
+    }
+
+    @Test fun returnedLyricsCannotMutateCacheAndDuplicateIdsAreNotAmbiguous() {
+        val clock = Clock()
+        val source = Source().apply { candidates = listOf(track(), track()) }
+        val result = ExternalMatcher().resolve(sample(clock), source)!!
+        assertEquals(1, source.lyricRequests)
+        (result.lyrics!!.lines as MutableList).clear()
+        assertEquals(1, result.lyrics!!.lines.size)
+    }
+
+    @Test fun shutdownDestroysAnActiveHelperWithoutWaitingForTimeout() {
+        val started = CountDownLatch(1)
+        val destroyed = CountDownLatch(1)
+        val child = object : Process() {
+            override fun getInputStream() = ByteArrayInputStream(byteArrayOf())
+            override fun getErrorStream() = ByteArrayInputStream(byteArrayOf())
+            override fun getOutputStream() = ByteArrayOutputStream()
+            override fun waitFor() = 0
+            override fun waitFor(timeout: Long, unit: TimeUnit): Boolean {
+                started.countDown()
+                destroyed.await(1, TimeUnit.SECONDS)
+                return false
+            }
+            override fun exitValue() = 1
+            override fun isAlive() = destroyed.count != 0L
+            override fun destroy() { destroyed.countDown() }
+            override fun destroyForcibly(): Process { destroy(); return this }
+        }
+        val provider = WindowsSessionProvider { child }
+        val worker = Thread { assertNull(provider.poll()) }
+        worker.start()
+        assertTrue(started.await(1, TimeUnit.SECONDS))
+        provider.close()
+        worker.join(1_000)
+        assertFalse(worker.isAlive)
+        assertEquals(0L, destroyed.count)
+    }
+
+    @Test fun lyricOffsetsClampForBothClockDirectionsAndOverflow() {
+        assertEquals(12_000L, lyricPosition(10_000, 20_000, 2_000))
+        assertEquals(8_000L, lyricPosition(10_000, 20_000, -2_000))
+        assertEquals(0L, lyricPosition(1_000, 20_000, -2_000))
+        assertEquals(20_000L, lyricPosition(19_000, 20_000, 2_000))
+        assertEquals(0L, lyricPosition(1_000, 0, 0))
+        assertEquals(0L, lyricPosition(1_000, -1, 0))
+        assertEquals(20_000L, lyricPosition(Long.MAX_VALUE, 20_000, 1))
+        assertEquals(0L, lyricPosition(Long.MIN_VALUE, 20_000, -1))
+    }
+
+    @Test fun snapshotKeyTracksSessionAndSongButNotPlaybackPosition() {
+        val clock = Clock()
+        val timeline = ExternalTimeline(clock)
+        timeline.accept(sample(clock))
+        val first = timeline.snapshot(null)
+        clock.advance(100)
+        assertEquals(first.key, timeline.snapshot(null).key)
+        timeline.accept(sample(clock, status = ExternalStatus.PAUSED, position = 90_000))
+        assertEquals(first.key, timeline.snapshot(null).key)
+        timeline.accept(sample(clock, session = "apple:2"))
+        assertNotEquals(first.key, timeline.snapshot(null).key)
+        timeline.accept(sample(clock, title = "Other"))
+        assertNotEquals(first.key, timeline.snapshot(null).key)
+        timeline.accept(null)
+        assertEquals("", timeline.snapshot(null).key)
+        assertNull(timeline.snapshot(null).lyrics)
+    }
+
+    @Test fun missingDurationKeepsMetadataButDoesNotGuessLyricsOrProgress() {
+        val clock = Clock()
+        val timeline = ExternalTimeline(clock)
+        val sample = sample(clock).copy(durationMs = 0)
+        assertTrue(timeline.accept(sample))
+        clock.advance(1_000)
+        assertEquals("Song", timeline.snapshot(null).title)
+        assertEquals(ExternalStatus.PLAYING, timeline.snapshot(null).status)
+        assertEquals(0L, timeline.snapshot(null).positionMs)
+        assertNull(ExternalMatcher().resolve(sample, Source().apply { candidates = listOf(track()) }))
+    }
+
+    @Test fun cachedLyricsKeepSplitSettingReversible() {
+        val before = LyricSplit.enabled
+        try {
+            LyricSplit.enabled = true
+            val result = ExternalMatch(track(), Lyrics(listOf(LyricLine(0, "你好 世界"), LyricLine(5_000, "再见")), "fake"))
+            assertEquals(3, result.lyrics!!.lines.size)
+            LyricSplit.enabled = false
+            assertEquals(2, result.lyrics!!.lines.size)
+        } finally { LyricSplit.enabled = before }
+    }
+}

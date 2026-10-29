@@ -287,3 +287,14 @@ Copy download link	复制下载链接
 Dango Music update: 	Dango Music 有新版本：
 Copy the download link in the player's settings	可在播放器设置里复制下载链接
 Loaded %d of %d songs	已加载 %d / %d 首
+External Player / Apple Music	外部播放器 / Apple Music
+Read-only Windows sync. Control playback in Apple Music; leave Listen Together first.	Windows 只读同步。请在 Apple Music 中控制播放；先退出一起听歌房间。
+Lyric offset (ms)	歌词偏移（毫秒）
+Positive: lyrics appear earlier. Negative: later. Applied to both players.	正值：歌词提前；负值：歌词延后。对内置和外部播放器均生效。
+Apple Music sync requires Windows 10 1809+ (x64).	Apple Music 同步需要 Windows 10 1809 或更新版本（x64）。
+Apple Music connected; no confident lyric match yet.	已连接 Apple Music；尚未找到可靠匹配的歌词。
+Apple Music connected; lyrics synchronized.	已连接 Apple Music；歌词同步中。
+External Player is off.	外部播放器已关闭。
+Apple Music unavailable. Check the bridge, app and timeline.	Apple Music 不可用。请检查桥接程序、应用及播放时间轴。
+Read-only: control playback in Apple Music. Listen Together is disabled.	只读模式：请在 Apple Music 中控制播放；一起听歌已禁用。
+Turn off External Player before using Listen Together.	请先关闭外部播放器，再使用一起听歌。

@@ -4,6 +4,7 @@ import javazoom.jl.decoder.Bitstream
 import javazoom.jl.decoder.Decoder
 import javazoom.jl.decoder.SampleBuffer
 import me.sorihiko.dango.DangoLogger
+import me.sorihiko.dango.music.external.ExternalPlayback
 
 import java.io.ByteArrayInputStream
 import java.util.Random
@@ -87,15 +88,33 @@ object MusicPlayer {
 
     val active: Boolean get() = current != null && (state == State.PLAYING || state == State.PAUSED || state == State.LOADING)
 
+    data class Snapshot(val track: NeteaseTrack, val state: State, val positionMs: Long)
+
+    fun snapshot(): Snapshot? {
+        repeat(3) {
+            val gen = generation
+            val track = current ?: return null
+            val st = state
+            val pos = positionMs
+            if (gen == generation && track === current && st == state) {
+                return if (st == State.PLAYING || st == State.PAUSED || st == State.LOADING)
+                    Snapshot(track, st, pos.coerceIn(0L, track.durationMs.takeIf { it > 0 } ?: Long.MAX_VALUE)) else null
+            }
+        }
+        return null
+    }
+
     // ---------------------------------------------------------------- 队列控制
 
     fun playQueue(tracks: List<NeteaseTrack>, startIndex: Int) {
+        if (ExternalPlayback.enabled) return
         if (tracks.isNotEmpty() && !canPlay(tracks[Math.floorMod(startIndex, tracks.size)])) return
         queue = tracks
         playIndex(startIndex)
     }
 
     fun playIndex(i: Int) {
+        if (ExternalPlayback.enabled) return
         val q = queue
         if (q.isEmpty()) return
         val idx = ((i % q.size) + q.size) % q.size
@@ -125,6 +144,7 @@ object MusicPlayer {
      * 起始位置在下载完成、真正开始播放前才计算（下载要好几秒，提前算会落后）。
      */
     fun playTrackAt(track: NeteaseTrack, startAt: () -> Long, paused: Boolean) {
+        if (ExternalPlayback.enabled) return
         if (!canPlay(track)) return
         queue = listOf(track)
         index = 0
@@ -139,6 +159,7 @@ object MusicPlayer {
 
     /** 一起听：跳到 ms 并设成播放 / 暂停（当前这首已经下载好时用） */
     fun syncTo(ms: Long, play: Boolean) {
+        if (ExternalPlayback.enabled) return
         val bytes = audio ?: return
         val target = ms.coerceIn(0L, max(0L, durationMs - 500))
         pausedAtMs = target
@@ -149,12 +170,14 @@ object MusicPlayer {
     }
 
     fun next() {
+        if (ExternalPlayback.enabled) return
         val q = queue
         if (q.isEmpty()) return
         playIndex(if (shuffle && q.size > 1) pickRandom(q.size) else index + 1)
     }
 
     fun prev() {
+        if (ExternalPlayback.enabled) return
         if (positionMs > 3000) {
             seek(0)
             return
@@ -169,6 +192,7 @@ object MusicPlayer {
     }
 
     fun togglePause() {
+        if (ExternalPlayback.enabled) return
         when (state) {
             State.PLAYING -> {
                 pausedAtMs = positionMs
@@ -190,6 +214,7 @@ object MusicPlayer {
     }
 
     fun seek(ms: Long) {
+        if (ExternalPlayback.enabled) return
         val bytes = audio ?: return
         val target = ms.coerceIn(0L, max(0L, durationMs - 500))
         // 暂停时拖动：停在新位置，仍保持暂停
@@ -296,6 +321,7 @@ object MusicPlayer {
     }
 
     private fun startDecode(gen: Int, bytes: ByteArray, startMs: Long) {
+        if (ExternalPlayback.enabled || gen != generation) return
         Thread({ decodeLoop(gen, bytes, startMs) }, "Dango-MusicDecode").apply {
             isDaemon = true
             start()
@@ -326,6 +352,7 @@ object MusicPlayer {
 
             var appliedVolume = -1f
             while (gen == generation) {
+                if (ExternalPlayback.enabled) return
                 val header = bitstream.readFrame()
                 if (header == null) {
                     finished = true
@@ -341,6 +368,7 @@ object MusicPlayer {
                     val format = AudioFormat(header.frequency().toFloat(), 16, sb.channelCount, true, false)
                     out = openLine(format, header.frequency() * sb.channelCount * 2 / 4)   // 约 0.25 秒缓冲
                     line = out
+                    if (gen != generation || ExternalPlayback.enabled) return
                     if (state == State.PAUSED) {
                         out.stop()
                     } else {

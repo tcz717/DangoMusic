@@ -42,6 +42,68 @@
 
 需要 JDK 8、21、25，运行 `build-all.bat`，jar 收集到 `dist/`（JDK 不在默认位置时设置 `DANGO_JDK21` / `DANGO_JDK25`）。
 
+### Apple Music 外部歌词同步 / external lyrics (Windows)
+
+这是**可选、只读**功能，默认关闭。需要 Windows 10 1809 或更新版本、x64 JVM，以及提供 Windows 系统媒体会话（SMTC）的 Windows Apple Music 应用。
+使用本 fork 的 **Apple Music Windows bridge** Actions 工作流产物中的 mod jar；其中包含从本仓库源码构建的桥接程序，无需自行运行脚本。
+普通、未打包桥接程序的 jar 仍可正常加载，但不能连接 Apple Music。
+
+1. 在 Apple Music 中播放歌曲。在 Minecraft 按 `M` → ⚙ → **音乐与 HUD** → **播放器**，打开 **外部播放器 / Apple Music**。
+2. 在侧栏选择歌词来源（网易云 / QQ / 酷狗）。匹配仅使用所选来源的搜索和歌词接口，不获取播放地址或下载音频。
+3. 确保 **歌词 → 3D 歌词** 开启；可以同时打开 **正在播放 / 封面**。封面来自可靠匹配的歌词曲库，不是 Apple 音频。
+4. **歌词偏移（毫秒）**会自动保存，对两种播放器均生效：正值提前显示歌词，负值延后（`歌词时间 = 播放时间 + 偏移`，限制在歌曲范围内）。例如歌词晚了 500ms，设为 `+500`。
+5. 播放、暂停、拖动、切歌和音量请在 Apple Music 中操作。开启外部模式会停止内置音频并锁住内置播放控制；先退出一起听歌房间才能开启。关闭外部模式不会自动恢复内置播放。
+
+**English:** Enable **External Player / Apple Music** under `M → Settings → Music & HUD → Player`.
+Use the mod jar from this fork's **Apple Music Windows bridge** workflow artifact: it bundles the source-built helper and extracts it lazily when enabled.
+Windows 10 1809+, Windows x64 Java, and the Windows Apple Music application's SMTC session are required.
+Other operating systems load normally and display an unsupported status; no Windows library is loaded at startup.
+Choose NetEase, QQ or Kugou in the sidebar for lyric lookup. Enable **3D lyrics**, and optionally **Now playing / Cover**, in Settings.
+Control playback in Apple Music, not Minecraft. Internal audio stops, internal transport/queue playback is blocked, and Listen Together is unavailable while external mode is active.
+The signed **Lyric offset (ms)** is persisted and shared with internal playback: positive means earlier lyrics, negative means later, clamped to song bounds.
+
+**匹配与限制 / matching and limitations**
+
+- Only the Apple Music app identity is accepted, never Windows' arbitrary “current player.” Multiple Apple sessions are rejected rather than guessed. No DRM, credentials, protected streams, decryption, recording or audio capture is involved.
+- Metadata/timeline polling and lyric IO run on workers. A timestamp-anchored monotonic clock handles rate, pause and seeks; missing, invalid or expired timelines clear the display rather than extrapolating forever. Helper failure or disconnect clears metadata/lyrics and polling retries automatically.
+- Matching requires normalized title and the complete artist set, plus a conservative duration tolerance when available. Ambiguous results are rejected. Live/remastered versions, artist aliases, regional catalogs and missing SMTC data can produce **no lyrics**; there is deliberately no fuzzy fallback. The bounded cache avoids repeated queries.
+- Word timing, ordinary 3D animation and matched catalog artwork reuse the existing renderer. Audio-energy beat pulses are zero in external mode. Song card and Dynamic Island remain internal-player HUDs.
+- No Apple login is performed by the mod. Existing providers may require network access/account permissions for lyrics. No Firebase credentials are needed to build or use external lyrics.
+- The helper is an unsigned local executable. Windows policy/antivirus may block it; never disable protections or substitute an untrusted executable. Missing helper/app/timeline shows an unavailable status. The helper is not a playback-control API.
+
+**Reproducible bridge and mod build (maintainers)**
+
+Use Visual Studio 2022 C++ tools, a Windows 10/11 SDK with C++/WinRT headers, CMake 3.21+, and JDK 21. From the repository root:
+
+```powershell
+cmake -S native/apple-music-bridge -B native/apple-music-bridge/build -A x64
+cmake --build native/apple-music-bridge/build --config Release
+ctest --test-dir native/apple-music-bridge/build -C Release --output-on-failure
+cmake --install native/apple-music-bridge/build --config Release --prefix common/core/src/main/resources
+.\modern\gradlew.bat -p common :core:test :ui:build --no-daemon
+.\modern\gradlew.bat -p modern :1.21.1-fabric:build --no-daemon
+```
+
+The install places `native/windows-x64/dango-apple-music.exe` in core resources before shading. The workflow verifies that the distributable jar contains it and uploads the jar plus helper.
+No executable is committed. A separately built trusted helper may alternatively be installed beside the mod jar as `dango-apple-music.exe`.
+Shared code still emits Java 8 bytecode; modern uses JDK 21, modern26 JDK 25, legacy JDK 8.
+The helper uses only Microsoft's official [`GlobalSystemMediaTransportControlsSessionManager`](https://learn.microsoft.com/en-us/uwp/api/windows.media.control.globalsystemmediatransportcontrolssessionmanager) APIs.
+Each invocation emits one bounded JSON snapshot (app/session identity, title/artists/album, duration, state, rate, position, timeline `LastUpdatedTime` and capture timestamp); the JVM enforces a process deadline and never logs process output.
+
+**Validation / 手动验收（Windows + Apple Music + Minecraft，尚待实机验证）**
+
+Automated fake-clock/provider tests and portable native protocol tests are separate from hardware validation. Consult the PR/Actions results for commands actually run; the following is a **pending manual checklist**, not a claim of tested hardware:
+
+- [ ] Enable external mode during internal playback: internal audio stops; queue/transport/hotkeys cannot start a second stream; disabling restores normal internal controls without auto-play.
+- [ ] Play a known matching track in Apple Music: title, artists, cover and timed words appear in the existing 3D renderer. Switch lyric provider and language; verify Chinese/English settings/help/status.
+- [ ] Pause for at least 30 seconds, resume, seek both backward and forward, and change playback rate if exposed: no advance while paused, no stale lyrics after seeks.
+- [ ] Change tracks quickly, including while a lyric query is pending; unrelated/ambiguous recordings show no lyrics and old covers/words do not attach to the new song.
+- [ ] Close/reopen Apple Music, lose the session/timeline, block or terminate the helper, then reconnect: stale content clears and recovery is automatic.
+- [ ] Play another media app with Apple Music closed, and with both apps open: never attach to the unrelated app.
+- [ ] Calibrate `+500` / `-500` ms and song-boundary clamping; restart Minecraft and confirm persistence.
+- [ ] Try Listen Together in external mode and external mode while in a room; confirm mutual exclusion and no external track broadcast.
+- [ ] Load on Linux/macOS, Windows without a helper, and Windows with a blocked helper: normal mod loading, appropriate status, no native startup dependency or crashes.
+
 <details>
 <summary>启用一起听歌（Firebase）</summary>
 

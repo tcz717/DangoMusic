@@ -1,0 +1,91 @@
+name: Apple Music Windows bridge
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'native/apple-music-bridge/**'
+      - 'common/**'
+      - 'modern/**'
+      - 'version.properties'
+      - '.github/workflows/apple-music.yml'
+  push:
+    branches: [main, master]
+    paths:
+      - 'native/apple-music-bridge/**'
+      - 'common/**'
+      - 'modern/**'
+      - 'version.properties'
+      - '.github/workflows/apple-music.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Configure with MSVC and the installed Windows SDK
+        run: cmake -S native/apple-music-bridge -B native/apple-music-bridge/build -G "Visual Studio 17 2022" -A x64 -DCMAKE_SYSTEM_VERSION=10.0.22621.0
+      - name: Build native helper and protocol tests
+        run: cmake --build native/apple-music-bridge/build --config Release
+      - name: Test native protocol
+        run: ctest --test-dir native/apple-music-bridge/build -C Release --output-on-failure
+      - name: Verify the one-shot Windows snapshot
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD 'native/apple-music-bridge/build/Release/dango-apple-music.exe'
+          $info = [System.Diagnostics.ProcessStartInfo]::new($exe)
+          $info.UseShellExecute = $false
+          $info.RedirectStandardOutput = $true
+          $info.RedirectStandardError = $true
+          $process = [System.Diagnostics.Process]::Start($info)
+          $stdout = $process.StandardOutput.ReadToEndAsync()
+          $stderr = $process.StandardError.ReadToEndAsync()
+          if (!$process.WaitForExit(10000)) {
+            $process.Kill()
+            throw 'Bridge exceeded its caller-owned 10 second deadline'
+          }
+          $output = $stdout.GetAwaiter().GetResult()
+          $errors = $stderr.GetAwaiter().GetResult()
+          if ($process.ExitCode -ne 0 -or $errors.Length -ne 0 -or
+              [System.Text.Encoding]::UTF8.GetByteCount($output) -gt 32768) {
+            throw 'Bridge failed its bounded-output contract'
+          }
+          if (($output.Trim() -split "`n").Count -ne 1) { throw 'Expected exactly one snapshot' }
+          $snapshot = $output | ConvertFrom-Json
+          if ($null -eq $snapshot.available -or
+              $snapshot.state -notin @('playing', 'paused', 'stopped')) {
+            throw 'Invalid snapshot protocol'
+          }
+      - name: Install helper into core resources before mod packaging
+        run: cmake --install native/apple-music-bridge/build --config Release --prefix common/core/src/main/resources
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Test core and build UI with the packaged helper
+        run: .\modern\gradlew.bat -p common :core:test :ui:build --no-daemon
+      - name: Package Fabric 1.21.1 mod with the helper
+        working-directory: modern
+        run: .\gradlew.bat :1.21.1-fabric:build --no-daemon
+      - name: Verify helper is inside the distributable mod
+        shell: pwsh
+        run: |
+          $jar = Get-ChildItem modern/versions/1.21.1-fabric/build/libs/*-fabric.jar | Select-Object -First 1
+          if (!$jar) { throw 'Distributable Fabric jar is missing' }
+          $entries = & jar tf $jar.FullName
+          if ('native/windows-x64/dango-apple-music.exe' -notin $entries) {
+            throw 'Packaged mod does not contain the Windows helper'
+          }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: apple-music-windows-x64
+          if-no-files-found: error
+          path: |
+            native/apple-music-bridge/build/Release/dango-apple-music.exe
+            modern/versions/1.21.1-fabric/build/libs/*-fabric.jar

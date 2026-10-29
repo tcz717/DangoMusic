@@ -33,6 +33,9 @@ node_modules/
 .DS_Store
 Thumbs.db
 
+# Built Windows SMTC helper, installed into resources only when packaging
+common/core/src/main/resources/native/windows-x64/*.exe
+
 # Notes for the AI assistant (instructions, hand-off and work plans): local only
 CLAUDE.md
 docs/OPUS-HANDOFF.md

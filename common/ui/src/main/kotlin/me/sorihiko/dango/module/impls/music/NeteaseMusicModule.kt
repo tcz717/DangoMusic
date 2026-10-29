@@ -16,6 +16,8 @@ import me.sorihiko.dango.music.MusicPlayer
 import me.sorihiko.dango.music.NeteaseApi
 import me.sorihiko.dango.music.MusicSources
 import me.sorihiko.dango.music.MusicSource
+import me.sorihiko.dango.music.external.ExternalPlayback
+import me.sorihiko.dango.party.ListenParty
 import me.sorihiko.dango.platform.Keys
 import me.sorihiko.dango.platform.PlayerAction
 import me.sorihiko.dango.platform.PlayerKeyBinding
@@ -39,6 +41,12 @@ class NeteaseMusicModule : Module() {
 
     @ModuleValue("Volume", "Playback volume")
     private val volume = FloatValue(0f, 1f, 0.2f, 2)
+
+    @ModuleValue("External Player / Apple Music", "Read-only Windows sync. Control playback in Apple Music; leave Listen Together first.")
+    private val externalPlayer = BooleanValue(false)
+
+    @ModuleValue("Lyric offset (ms)", "Positive: lyrics appear earlier. Negative: later. Applied to both players.")
+    val lyricOffset = IntValue(-10000, 10000, 0)
 
     @ModuleValue("Language", "Choose the player interface language")
     // -1：尚未根据游戏语言初始化。早期 Fabric 入口处 Options 可能仍为空。
@@ -120,6 +128,7 @@ class NeteaseMusicModule : Module() {
     }
 
     override fun onDisable() {
+        ExternalPlayback.enabled = false
         MusicPlayer.stop()
     }
 
@@ -165,6 +174,11 @@ class NeteaseMusicModule : Module() {
         MusicSources.selected = MusicSource.values()[musicSource.value]
         DangoMusic.instance.platform.syncKeyBindings(keyBindings)
         UpdateChecker.tick(checkUpdates.get())
+        val external = enabled && externalPlayer.get() && ListenParty.role == ListenParty.Role.NONE && !ListenParty.busy
+        if (external != ExternalPlayback.enabled) {
+            ExternalPlayback.enabled = external
+            if (external) MusicPlayer.stop()
+        }
         if (!enabled) return
         // 歌词模块一直开着（显示与否由 3D lyrics 控制）；等配置读回之后再检查
         if (++tickCount > 5) lyrics()?.let { if (!it.enabled) it.enabled = true }
