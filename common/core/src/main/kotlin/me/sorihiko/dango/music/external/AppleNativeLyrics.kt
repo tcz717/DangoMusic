@@ -328,10 +328,11 @@ internal class ITunesCatalogLookup : AppleCatalogLookup {
 
     override fun resolve(sample: ExternalSample, active: () -> Boolean): Long? {
         if (sample.title.length !in 1..300 || sample.artists.size != 1 ||
-            sample.artists.single().length !in 1..200 || sample.album.length > 300 ||
+            sample.artists.single().length !in 1..300 || sample.album.length > 300 ||
             sample.durationMs !in 1..86_400_000L || !active()) return null
-        val key = listOf(normalize(sample.title), normalize(sample.artists.single()),
-            normalize(sample.album), sample.durationMs.toString()).joinToString("|")
+        val display = displayMetadata(sample) ?: return null
+        val key = listOf(normalize(sample.title), normalize(display.artist),
+            normalize(display.album), sample.durationMs.toString()).joinToString("|")
         val now = System.nanoTime()
         synchronized(cache) {
             val cached = cache[key]
@@ -354,16 +355,18 @@ internal class ITunesCatalogLookup : AppleCatalogLookup {
     ): Boolean {
         if (sample.artists.size != 1 || sample.durationMs !in 1..86_400_000L ||
             durationMs !in 1..86_400_000L) return false
+        val expected = displayMetadata(sample) ?: return false
         val titleMatches = normalize(title) == normalize(sample.title)
-        val artistMatches = normalize(artist) == normalize(sample.artists.singleOrNull().orEmpty())
-        val albumMatches = sample.album.isBlank() || album.isBlank() || normalize(album) == normalize(sample.album)
+        val artistMatches = normalize(artist) == normalize(expected.artist)
+        val albumMatches = expected.album.isBlank() || normalize(album) == normalize(expected.album)
         return titleMatches && artistMatches && albumMatches &&
             kotlin.math.abs(durationMs - sample.durationMs) <= 2000L
     }
 
     private fun search(sample: ExternalSample, active: () -> Boolean): Long? {
-        val term = URLEncoder.encode("${sample.title} ${sample.artists.single()}", "UTF-8")
-        val url = URL("https://itunes.apple.com/search?entity=song&limit=20&term=$term")
+        val expected = displayMetadata(sample) ?: return null
+        val term = URLEncoder.encode("${sample.title} ${expected.artist} ${expected.album}", "UTF-8")
+        val url = URL("https://itunes.apple.com/search?country=cn&entity=song&limit=20&term=$term")
         val connection = url.openConnection() as HttpURLConnection
         try {
             connection.connectTimeout = 2500
@@ -410,6 +413,22 @@ internal class ITunesCatalogLookup : AppleCatalogLookup {
         Normalizer.normalize(value, Normalizer.Form.NFKC).lowercase(Locale.ROOT)
             .filter { it.isLetterOrDigit() }
 
+    private data class DisplayMetadata(val artist: String, val album: String)
+
+    private fun displayMetadata(sample: ExternalSample): DisplayMetadata? {
+        val displayedArtist = sample.artists.singleOrNull()?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        if (sample.album.isNotBlank()) return DisplayMetadata(displayedArtist, sample.album.trim())
+        val separator = " — "
+        val first = displayedArtist.indexOf(separator)
+        if (first < 1 || displayedArtist.indexOf(separator, first + separator.length) >= 0) {
+            return DisplayMetadata(displayedArtist, "")
+        }
+        val artist = displayedArtist.substring(0, first).trim()
+        val album = displayedArtist.substring(first + separator.length).trim()
+        if (artist.isEmpty() || album.isEmpty()) return DisplayMetadata(displayedArtist, "")
+        return DisplayMetadata(artist, album)
+    }
+
     companion object {
         private const val MAX_ITUNES_BYTES = 256 * 1024
     }
@@ -417,6 +436,7 @@ internal class ITunesCatalogLookup : AppleCatalogLookup {
 
 internal object SecureTtmlParser {
     private data class Timing(val startMs: Long, val endMs: Long?)
+    private data class ParsedTime(val millis: Long, val mediaAbsolute: Boolean)
     private data class Piece(val text: String, val timing: Timing?, val preserve: Boolean)
     private data class WordBuilder(val timing: Timing, val pieces: MutableList<Piece> = mutableListOf())
 
@@ -649,30 +669,33 @@ internal object SecureTtmlParser {
         if ((attr(element, "begin") != null && begin == null) ||
             (attr(element, "end") != null && end == null) ||
             (attr(element, "dur") != null && duration == null)) return null
-        val start = begin?.let { safeAdd(parent.startMs, it) } ?: parent.startMs
+        val start = begin?.let {
+            if (it.mediaAbsolute) it.millis else safeAdd(parent.startMs, it.millis) ?: return null
+        } ?: parent.startMs
         val finish = when {
-            duration != null -> safeAdd(start, duration)
-            end != null -> safeAdd(parent.startMs, end)
+            duration != null -> safeAdd(start, duration.millis)
+            end != null -> if (end.mediaAbsolute) end.millis else safeAdd(parent.startMs, end.millis)
             else -> parent.endMs
         }
         if (start !in 0..MAX_TIME_MS || finish != null && finish !in start..MAX_TIME_MS) return null
         return Timing(start, finish)
     }
 
-    private fun parseTime(value: String): Long? {
+    private fun parseTime(value: String): ParsedTime? {
         val raw = value.trim()
         val offset = Regex("""^([+-]?\d+(?:\.\d+)?)(ms|s)$""").matchEntire(raw)
         if (offset != null) {
             val n = offset.groupValues[1].toBigDecimalOrNull() ?: return null
             val millis = if (offset.groupValues[2] == "s") n.multiply(BigDecimal(1000)) else n
-            return try { millis.setScale(0, java.math.RoundingMode.HALF_UP).longValueExact() }
+            return try { ParsedTime(millis.setScale(0, java.math.RoundingMode.HALF_UP).longValueExact(), false) }
             catch (_: Exception) { null }
         }
         val bareSeconds = raw.toBigDecimalOrNull()
         if (bareSeconds != null) {
             if (bareSeconds < BigDecimal.ZERO) return null
             return try {
-                bareSeconds.multiply(BigDecimal(1000)).setScale(0, java.math.RoundingMode.HALF_UP).longValueExact()
+                ParsedTime(bareSeconds.multiply(BigDecimal(1000))
+                    .setScale(0, java.math.RoundingMode.HALF_UP).longValueExact(), false)
             } catch (_: Exception) { null }
         }
         val parts = raw.split(':')
@@ -685,7 +708,7 @@ internal object SecureTtmlParser {
         val total = BigDecimal(hours).multiply(BigDecimal(3_600_000))
             .add(BigDecimal(minutes).multiply(BigDecimal(60_000)))
             .add(seconds.multiply(BigDecimal(1000)))
-        return try { total.setScale(0, java.math.RoundingMode.HALF_UP).longValueExact() }
+        return try { ParsedTime(total.setScale(0, java.math.RoundingMode.HALF_UP).longValueExact(), true) }
         catch (_: Exception) { null }
     }
 

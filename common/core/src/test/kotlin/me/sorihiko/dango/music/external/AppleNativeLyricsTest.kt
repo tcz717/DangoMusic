@@ -111,6 +111,17 @@ class AppleNativeLyricsTest {
         assertEquals(listOf(1_500L, 200L), line.words!!.map { it.durMs })
     }
 
+    @Test fun AppleClockTimesInSpansAreMediaAbsoluteNotAddedToParagraphBegin() {
+        val ttml = """
+            <tt xmlns="urn:ttml"><body><p begin="00:10.000" end="00:12.000"><span begin="00:10.500" end="00:10.800">Hello </span><span begin="00:11.000" dur="250ms">world</span></p></body></tt>
+        """.trimIndent()
+        val line = SecureTtmlParser.parse(ttml)!!.single()
+        assertEquals(10_000L, line.timeMs)
+        assertEquals("Hello world", line.text)
+        assertEquals(listOf(10_500L, 11_000L), line.words!!.map { it.startMs })
+        assertEquals(listOf(300L, 250L), line.words!!.map { it.durMs })
+    }
+
     @Test fun lineOnlyLyricsPreserveAppleMetadataOffsetsWithoutApplyingThem() {
         val ttml = """
             <tt xmlns="urn:ttml" xmlns:i="urn:itunes">
@@ -154,6 +165,21 @@ class AppleNativeLyricsTest {
         assertFalse(lookup.metadataMatches(player, "Sample", "Another Artist", "Album", 200_000))
         assertFalse(lookup.metadataMatches(player, "Sample", "Artist", "Another Album", 200_000))
         assertFalse(lookup.metadataMatches(player, "Sample", "Artist", "Album", 202_001))
+    }
+
+    @Test fun decoratedSmtcArtistMustMatchCatalogArtistAndAlbumExactly() {
+        val player = ExternalSample("apple-session", "在银河中孤独摇摆",
+            listOf("知更鸟, HOYO-MiX & Chevy — 空气蛹 - EP"), "", 165_000L, 0,
+            1_800_000_000_000L, 1_800_000_000_000L, 0.0, ExternalStatus.PAUSED)
+        val lookup = ITunesCatalogLookup()
+        assertTrue(lookup.metadataMatches(player, "在银河中孤独摇摆",
+            "知更鸟, HOYO-MiX & Chevy", "空气蛹 - EP", 165_463))
+        assertFalse(lookup.metadataMatches(player, "在银河中孤独摇摆",
+            "知更鸟", "空气蛹 - EP", 165_463))
+        assertFalse(lookup.metadataMatches(player, "在银河中孤独摇摆",
+            "知更鸟, HOYO-MiX & Chevy", "Other EP", 165_463))
+        assertFalse(lookup.metadataMatches(player, "在银河中孤独摇摆",
+            "知更鸟, HOYO-MiX & Chevy", "空气蛹 - EP", 170_000))
     }
 
     @Test fun rejectsExternalEntitiesAndOversizedXml() {
