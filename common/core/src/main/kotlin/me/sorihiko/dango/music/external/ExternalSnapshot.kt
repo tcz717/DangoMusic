@@ -4,7 +4,7 @@ import me.sorihiko.dango.lyrics.Lyrics
 import me.sorihiko.dango.music.NeteaseTrack
 import java.util.Collections
 
-enum class ExternalStatus { DISABLED, UNSUPPORTED, DISCONNECTED, PLAYING, PAUSED, STOPPED }
+enum class ExternalStatus { DISABLED, UNSUPPORTED, HELPER_MISSING, DISCONNECTED, PLAYING, PAUSED, STOPPED }
 
 /** One coherent read; position is fixed at the instant this snapshot was obtained. */
 class ExternalSnapshot internal constructor(
@@ -64,30 +64,37 @@ internal data class ExternalSample(
     fun identity() = listOf(sessionId, title, album, durationMs.toString(), artists.size.toString()) + artists
 }
 
+/** Playing anchors expire after 30 seconds; paused anchors may be old but captures must stay fresh. */
 internal class ExternalTimeline(private val clock: ExternalClock) {
     private var sample: ExternalSample? = null
     private var receivedNs = 0L
     private var anchorPosition = 0L
+    private var anchorAgeMs = 0L
 
     fun accept(value: ExternalSample?): Boolean {
         if (value == null || value.sessionId.isBlank() || value.title.isBlank() ||
             value.durationMs !in 0..86_400_000L ||
             value.capturedAtUnixMs <= 0 ||
-            kotlin.math.abs(clock.unixMs() - value.capturedAtUnixMs) > 10_000 ||
+            clock.unixMs() - value.capturedAtUnixMs !in 0..5_000L ||
             value.status !in listOf(ExternalStatus.PLAYING, ExternalStatus.PAUSED, ExternalStatus.STOPPED)) {
             sample = null
             return false
         }
         val age = value.capturedAtUnixMs - value.updatedAtUnixMs
-        val validAnchor = value.updatedAtUnixMs > 0 && age in 0..86_400_000L
-        val rate = value.playbackRate.takeIf { it.isFinite() && it in 0.0..8.0 } ?: 0.0
-        val running = value.status == ExternalStatus.PLAYING && validAnchor
-        val transportDelay = (clock.unixMs() - value.capturedAtUnixMs).coerceIn(0, 10_000)
+        val transportDelay = (clock.unixMs() - value.capturedAtUnixMs).coerceIn(0, 5_000)
+        anchorAgeMs = age + transportDelay
+        val running = value.status == ExternalStatus.PLAYING
+        if (value.updatedAtUnixMs <= 0 || age < 0 ||
+            (running && (anchorAgeMs > 30_000 || !value.playbackRate.isFinite() || value.playbackRate !in 0.0..8.0))) {
+            sample = null
+            return false
+        }
+        val rate = if (running) value.playbackRate else 0.0
         anchorPosition = (value.positionMs.toDouble() +
             if (running) (age + transportDelay) * rate else 0.0)
             .coerceIn(0.0, value.durationMs.toDouble()).toLong()
         sample = value.copy(artists = Collections.unmodifiableList(ArrayList(value.artists)),
-            playbackRate = if (running) rate else 0.0)
+            playbackRate = rate)
         receivedNs = clock.nanoTime()
         return true
     }
@@ -95,7 +102,8 @@ internal class ExternalTimeline(private val clock: ExternalClock) {
     fun snapshot(match: ExternalMatch?): ExternalSnapshot {
         val s = sample ?: return ExternalSnapshot(ExternalStatus.DISCONNECTED)
         val elapsed = ((clock.nanoTime() - receivedNs).coerceAtLeast(0) / 1_000_000L)
-        if (elapsed > 5_000) return ExternalSnapshot(ExternalStatus.DISCONNECTED)
+        if (elapsed > 5_000 || (s.status == ExternalStatus.PLAYING && anchorAgeMs + elapsed > 30_000))
+            return ExternalSnapshot(ExternalStatus.DISCONNECTED)
         val position = (anchorPosition + elapsed * s.playbackRate).coerceIn(0.0, s.durationMs.toDouble()).toLong()
         return ExternalSnapshot(s.status, s.sessionId, s.title, s.artists, s.album, s.durationMs, position, match)
     }

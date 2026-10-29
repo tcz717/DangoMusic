@@ -21,7 +21,7 @@ std::string metadata(const winrt::hstring& value) {
     // Bound conversion allocation too, and do not split a UTF-16 surrogate pair.
     auto length = std::min<std::size_t>(value.size(), dango::max_text_bytes);
     if (length < value.size() && length > 0 &&
-        value[length - 1] >= 0xd800 && value[length - 1] <= 0xdbff) {
+        value.c_str()[length - 1] >= 0xd800 && value.c_str()[length - 1] <= 0xdbff) {
         --length;
     }
     return dango::bounded_utf8(winrt::to_string(std::wstring_view(value.c_str(), length)));

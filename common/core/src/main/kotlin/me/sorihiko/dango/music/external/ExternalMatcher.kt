@@ -42,7 +42,8 @@ internal class ExternalMatcher {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Key, ExternalMatch?>?) = size > 64
     }
 
-    fun resolve(sample: ExternalSample, api: MusicSourceApi): ExternalMatch? {
+    fun resolve(sample: ExternalSample, api: MusicSourceApi, active: () -> Boolean = { true }): ExternalMatch? {
+        if (!active()) return null
         val key = Key(api.source, sample.title, sample.artists.toList(), sample.durationMs)
         synchronized(cache) { if (cache.containsKey(key)) return cache[key] }
         val result = try {
@@ -51,12 +52,14 @@ internal class ExternalMatcher {
             else {
                 val candidates = api.search("${sample.title} ${sample.artists.joinToString(" ")}".take(512))
                     .take(40).filter { matches(sample, it) }.distinctBy { it.key }
+                if (!active()) return null
                 if (candidates.size == 1) {
                     val track = candidates.single()
                     ExternalMatch(track, api.lyrics(track))
                 } else null
             }
         } catch (_: Exception) { null }
+        if (!active()) return null
         synchronized(cache) { cache[key] = result }
         return result
     }

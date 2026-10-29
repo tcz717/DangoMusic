@@ -292,6 +292,7 @@ Read-only Windows sync. Control playback in Apple Music; leave Listen Together f
 Lyric offset (ms)	歌词偏移（毫秒）
 Positive: lyrics appear earlier. Negative: later. Applied to both players.	正值：歌词提前；负值：歌词延后。对内置和外部播放器均生效。
 Apple Music sync requires Windows 10 1809+ (x64).	Apple Music 同步需要 Windows 10 1809 或更新版本（x64）。
+Apple Music bridge missing. Install the Windows workflow's bundled mod jar.	缺少 Apple Music 桥接程序。请安装 Windows 工作流中包含桥接程序的 mod jar。
 Apple Music connected; no confident lyric match yet.	已连接 Apple Music；尚未找到可靠匹配的歌词。
 Apple Music connected; lyrics synchronized.	已连接 Apple Music；歌词同步中。
 External Player is off.	外部播放器已关闭。

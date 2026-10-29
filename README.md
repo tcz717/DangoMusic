@@ -65,18 +65,20 @@ The signed **Lyric offset (ms)** is persisted and shared with internal playback:
 **匹配与限制 / matching and limitations**
 
 - Only the Apple Music app identity is accepted, never Windows' arbitrary “current player.” Multiple Apple sessions are rejected rather than guessed. No DRM, credentials, protected streams, decryption, recording or audio capture is involved.
+- SMTC exposes the app identity, not a stable session-instance/process ID. An identical-song restart between polls cannot be identified as a distinct process; the next valid timeline is used, and observed disconnects invalidate pending lyric work.
 - Metadata/timeline polling and lyric IO run on workers. A timestamp-anchored monotonic clock handles rate, pause and seeks; missing, invalid or expired timelines clear the display rather than extrapolating forever. Helper failure or disconnect clears metadata/lyrics and polling retries automatically.
+- Polling is every 500ms after each result, with a 2-second helper deadline. A feed expires after 5 seconds without a valid sample. Playing anchors expire after 30 seconds; a provider that publishes less frequently will deliberately show unavailable until its next timeline update. Paused positions never extrapolate and may use an older anchor while samples stay fresh.
 - Matching requires normalized title and the complete artist set, plus a conservative duration tolerance when available. Ambiguous results are rejected. Live/remastered versions, artist aliases, regional catalogs and missing SMTC data can produce **no lyrics**; there is deliberately no fuzzy fallback. The bounded cache avoids repeated queries.
 - Word timing, ordinary 3D animation and matched catalog artwork reuse the existing renderer. Audio-energy beat pulses are zero in external mode. Song card and Dynamic Island remain internal-player HUDs.
-- No Apple login is performed by the mod. Existing providers may require network access/account permissions for lyrics. No Firebase credentials are needed to build or use external lyrics.
+- No Apple login is performed by the mod. Enabling matching sends title/artist search queries to the selected lyric provider, which may require network access/account permissions. No Firebase credentials are needed to build or use external lyrics.
 - The helper is an unsigned local executable. Windows policy/antivirus may block it; never disable protections or substitute an untrusted executable. Missing helper/app/timeline shows an unavailable status. The helper is not a playback-control API.
 
 **Reproducible bridge and mod build (maintainers)**
 
-Use Visual Studio 2022 C++ tools, a Windows 10/11 SDK with C++/WinRT headers, CMake 3.21+, and JDK 21. From the repository root:
+Use Visual Studio 2022 C++ tools, Windows SDK 10.0.22621.0 with C++/WinRT headers (as in CI), CMake 3.21+, and JDK 21. From the repository root:
 
 ```powershell
-cmake -S native/apple-music-bridge -B native/apple-music-bridge/build -A x64
+cmake -S native/apple-music-bridge -B native/apple-music-bridge/build -A x64 -DCMAKE_SYSTEM_VERSION=10.0.22621.0
 cmake --build native/apple-music-bridge/build --config Release
 ctest --test-dir native/apple-music-bridge/build -C Release --output-on-failure
 cmake --install native/apple-music-bridge/build --config Release --prefix common/core/src/main/resources

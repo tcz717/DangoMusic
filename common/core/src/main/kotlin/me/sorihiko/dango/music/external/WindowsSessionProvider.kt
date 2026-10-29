@@ -4,27 +4,39 @@ import com.google.gson.JsonParser
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.file.Files
-import java.nio.file.StandardCopyOption
+import java.nio.file.Path
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 internal interface ExternalSessionProvider {
+    val failure: ExternalStatus? get() = null
     fun poll(): ExternalSample?
     fun close()
 }
 
 /** Runs only the bundled executable (or an explicitly installed sibling), never a shell or PATH command. */
-internal class WindowsSessionProvider(private val launch: (() -> Process)? = null) : ExternalSessionProvider {
+internal class WindowsSessionProvider(
+    private val locateHelper: (() -> File?)? = null,
+    private val launch: (() -> Process)? = null,
+) : ExternalSessionProvider {
     private val process = AtomicReference<Process?>()
     @Volatile private var closed = false
     private var executable: File? = null
+    @Volatile private var extractedDirectory: Path? = null
+    override var failure: ExternalStatus? = null
+        private set
 
     override fun poll(): ExternalSample? {
-        if (closed || (launch == null && !supported())) return null
+        failure = null
+        if (closed || (launch == null && locateHelper == null && !supported())) return null
         return try {
             val child = if (launch != null) launch.invoke() else {
-                val helper = executable ?: locate()?.also { executable = it } ?: return null
+                val helper = executable ?: (if (locateHelper == null) locate() else locateHelper.invoke())
+                    ?.also { executable = it } ?: run {
+                        failure = ExternalStatus.HELPER_MISSING
+                        return null
+                    }
                 ProcessBuilder(helper.absolutePath).redirectErrorStream(true).start()
             }
             process.set(child)
@@ -59,12 +71,17 @@ internal class WindowsSessionProvider(private val launch: (() -> Process)? = nul
                 if (child.isAlive) child.destroyForcibly()
                 try { child.inputStream.close() } catch (_: Exception) { }
             }
+            if (closed) cleanup()
         }
     }
 
     override fun close() {
         closed = true
-        process.getAndSet(null)?.destroyForcibly()
+        process.getAndSet(null)?.let { child ->
+            child.destroyForcibly()
+            try { child.waitFor(250, TimeUnit.MILLISECONDS) } catch (_: Exception) { }
+        }
+        cleanup()
     }
 
     private fun locate(): File? {
@@ -73,14 +90,28 @@ internal class WindowsSessionProvider(private val launch: (() -> Process)? = nul
             resource.use { input ->
                 val dir = File(System.getProperty("user.home"), ".dango/native")
                 if (!dir.isDirectory && !dir.mkdirs()) return null
-                val target = File(dir, "dango-apple-music.exe")
-                Files.copy(input, target.toPath(), StandardCopyOption.REPLACE_EXISTING)
-                return target
+                val isolated = Files.createTempDirectory(dir.toPath(), "apple-music-")
+                extractedDirectory = isolated
+                isolated.toFile().deleteOnExit()
+                val target = isolated.resolve("dango-apple-music.exe")
+                target.toFile().deleteOnExit()
+                Files.copy(input, target)
+                if (closed) { cleanup(); return null }
+                return target.toFile()
             }
         }
         val jar = File(javaClass.protectionDomain.codeSource.location.toURI())
         if (!jar.isFile) return null
         return File(jar.parentFile, "dango-apple-music.exe").takeIf { it.isFile }
+    }
+
+    @Synchronized private fun cleanup() {
+        val directory = extractedDirectory ?: return
+        try {
+            Files.deleteIfExists(directory.resolve("dango-apple-music.exe"))
+            Files.deleteIfExists(directory)
+            extractedDirectory = null
+        } catch (_: Exception) { }
     }
 
     companion object {

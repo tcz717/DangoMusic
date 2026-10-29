@@ -84,18 +84,19 @@ class ExternalPlaybackTest {
         assertEquals(3_500L, timeline.snapshot(null).positionMs)
     }
 
-    @Test fun invalidAnchorsDoNotInventElapsedTimeAndStaleFeedDisconnects() {
+    @Test fun invalidAnchorsClearMetadataAndStaleFeedDisconnects() {
         val clock = Clock()
         val timeline = ExternalTimeline(clock)
         timeline.accept(sample(clock).copy(updatedAtUnixMs = 0))
         clock.advance(1_000)
-        assertEquals(10_000L, timeline.snapshot(null).positionMs)
+        assertEquals(ExternalStatus.DISCONNECTED, timeline.snapshot(null).status)
+        assertEquals("", timeline.snapshot(null).title)
         timeline.accept(sample(clock, age = -500))
         clock.advance(1_000)
-        assertEquals(10_000L, timeline.snapshot(null).positionMs)
+        assertEquals(ExternalStatus.DISCONNECTED, timeline.snapshot(null).status)
         timeline.accept(sample(clock, rate = Double.NaN))
         clock.advance(1_000)
-        assertEquals(10_000L, timeline.snapshot(null).positionMs)
+        assertEquals(ExternalStatus.DISCONNECTED, timeline.snapshot(null).status)
         clock.advance(5_001)
         assertEquals(ExternalStatus.DISCONNECTED, timeline.snapshot(null).status)
         assertNull(timeline.snapshot(null).track)
@@ -310,6 +311,7 @@ class ExternalPlaybackTest {
         assertEquals(0L, lyricPosition(1_000, -1, 0))
         assertEquals(20_000L, lyricPosition(Long.MAX_VALUE, 20_000, 1))
         assertEquals(0L, lyricPosition(Long.MIN_VALUE, 20_000, -1))
+        assertEquals(12_000L, ExternalPlayback.lyricPosition(10_000, 20_000, 2_000))
     }
 
     @Test fun snapshotKeyTracksSessionAndSongButNotPlaybackPosition() {
@@ -351,5 +353,63 @@ class ExternalPlaybackTest {
             LyricSplit.enabled = false
             assertEquals(2, result.lyrics!!.lines.size)
         } finally { LyricSplit.enabled = before }
+    }
+
+    @Test fun cancellationDuringSearchDoesNotStartALyricRequest() {
+        val clock = Clock()
+        val tasks = Tasks()
+        var lyricRequests = 0
+        lateinit var engine: ExternalEngine
+        val source = object : MusicSourceApi {
+            override val source = MusicSource.NETEASE
+            override fun search(query: String): List<NeteaseTrack> {
+                engine.reset(ExternalStatus.DISABLED)
+                return listOf(track())
+            }
+            override fun lyrics(track: NeteaseTrack): Lyrics? { lyricRequests++; return null }
+            override fun songUrl(track: NeteaseTrack): NeteaseApi.SongUrl? = error("audio")
+        }
+        engine = ExternalEngine(clock, tasks, { source })
+        engine.accept(sample(clock))
+        tasks.run()
+        assertEquals(0, lyricRequests)
+        assertEquals(ExternalStatus.DISABLED, engine.snapshot().status)
+        assertNull(engine.snapshot().lyrics)
+    }
+
+    @Test fun repeatedFreshCapturesDoNotKeepAnOldPlayingAnchorAlive() {
+        val clock = Clock()
+        val timeline = ExternalTimeline(clock)
+        val anchor = sample(clock)
+        val match = ExternalMatch(track(), Lyrics(listOf(LyricLine(0, "lyrics")), "fake"))
+        timeline.accept(anchor)
+        clock.advance(29_000)
+        assertTrue(timeline.accept(anchor.copy(capturedAtUnixMs = clock.wall)))
+        assertEquals(39_000L, timeline.snapshot(match).positionMs)
+        assertNotNull(timeline.snapshot(match).lyrics)
+        clock.advance(1_001)
+        val stale = timeline.snapshot(match)
+        assertEquals(ExternalStatus.DISCONNECTED, stale.status)
+        assertEquals("", stale.key)
+        assertNull(stale.lyrics)
+        assertFalse(timeline.accept(anchor.copy(capturedAtUnixMs = clock.wall)))
+        assertEquals(ExternalStatus.DISCONNECTED, timeline.snapshot(match).status)
+        assertTrue(timeline.accept(sample(clock, position = 2_000)))
+        assertEquals(2_000L, timeline.snapshot(null).positionMs)
+    }
+
+    @Test fun oldPausedAnchorsRemainFixedOnlyWhileCaptureIsFresh() {
+        val clock = Clock()
+        val timeline = ExternalTimeline(clock)
+        val paused = sample(clock, status = ExternalStatus.PAUSED, age = 172_800_000)
+        assertTrue(timeline.accept(paused))
+        clock.advance(4_000)
+        assertEquals(10_000L, timeline.snapshot(null).positionMs)
+        assertTrue(timeline.accept(paused.copy(capturedAtUnixMs = clock.wall)))
+        clock.advance(4_000)
+        assertEquals(ExternalStatus.PAUSED, timeline.snapshot(null).status)
+        clock.advance(1_001)
+        assertEquals(ExternalStatus.DISCONNECTED, timeline.snapshot(null).status)
+        assertFalse(timeline.accept(paused.copy(capturedAtUnixMs = clock.wall, updatedAtUnixMs = 0)))
     }
 }

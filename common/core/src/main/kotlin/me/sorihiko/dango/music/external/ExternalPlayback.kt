@@ -22,6 +22,14 @@ object ExternalPlayback {
     private var provider: ExternalSessionProvider? = null
     private var epoch = 0L
 
+    init {
+        try {
+            Runtime.getRuntime().addShutdownHook(Thread({ stop() }, "Dango-AppleMusic-Shutdown"))
+        } catch (_: IllegalStateException) {
+        } catch (_: SecurityException) {
+        }
+    }
+
     @set:Synchronized
     @Volatile var enabled = false
         set(value) {
@@ -45,7 +53,10 @@ object ExternalPlayback {
             executor.scheduleWithFixedDelay({
                 val value = sessionProvider.poll()
                 synchronized(this) {
-                    if (generation == epoch && enabled) engine.accept(value)
+                    if (generation == epoch && enabled) {
+                        val failure = sessionProvider.failure
+                        if (failure != null) engine.reset(failure) else engine.accept(value)
+                    }
                 }
             }, 0, 500, TimeUnit.MILLISECONDS)
         }
@@ -63,6 +74,8 @@ object ExternalPlayback {
 
     val snapshot: ExternalSnapshot get() = snapshot()
     fun snapshot(): ExternalSnapshot = engine.snapshot()
+    fun lyricPosition(positionMs: Long, durationMs: Long, offsetMs: Int): Long =
+        me.sorihiko.dango.music.external.lyricPosition(positionMs, durationMs, offsetMs)
 }
 
 /** Serialized publication, with generation checks across session, track, provider and lifecycle changes. */
@@ -99,7 +112,9 @@ internal class ExternalEngine(
         identity = key
         match = null
         executor.execute {
-            val result = matcher.resolve(sample, source)
+            val result = matcher.resolve(sample, source) {
+                synchronized(this) { generation == token && identity == key }
+            }
             synchronized(this) {
                 if (generation == token && identity == key) match = result
             }
@@ -107,7 +122,8 @@ internal class ExternalEngine(
     }
 
     @Synchronized fun snapshot(): ExternalSnapshot =
-        if (status in listOf(ExternalStatus.DISABLED, ExternalStatus.UNSUPPORTED, ExternalStatus.DISCONNECTED))
+        if (status in listOf(ExternalStatus.DISABLED, ExternalStatus.UNSUPPORTED,
+                ExternalStatus.HELPER_MISSING, ExternalStatus.DISCONNECTED))
             ExternalSnapshot(status)
         else timeline.snapshot(match)
 }
