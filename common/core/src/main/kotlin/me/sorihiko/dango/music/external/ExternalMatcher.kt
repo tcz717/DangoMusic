@@ -1,7 +1,6 @@
 package me.sorihiko.dango.music.external
 
 import me.sorihiko.dango.lyrics.LyricLine
-import me.sorihiko.dango.lyrics.LyricWord
 import me.sorihiko.dango.lyrics.Lyrics
 import me.sorihiko.dango.music.MusicSource
 import me.sorihiko.dango.music.MusicSourceApi
@@ -13,19 +12,9 @@ import java.util.Locale
 
 internal class ExternalMatch(track: NeteaseTrack, lyrics: Lyrics?) {
     private val track = copy(track)
-    private val storedLyrics = lyrics?.takeIf { bounded(it.lines) }
+    private val storedLyrics = lyrics?.takeIf { bounded(it.unsplitLines) }?.immutablePreparedCopy()
     val hasLyrics: Boolean get() = storedLyrics != null
-    val lyrics: Lyrics? get() = storedLyrics?.let(::copyLyrics)
-
-    private fun copyLyrics(original: Lyrics): Lyrics? {
-        val lines = original.lines
-        if (!bounded(lines)) return null
-        return Lyrics(Collections.unmodifiableList(lines.map { line ->
-            LyricLine(line.timeMs, line.text, line.words?.let { words ->
-                Collections.unmodifiableList(words.map { LyricWord(it.startMs, it.durMs, it.text) })
-            })
-        }), original.sourceName)
-    }
+    val lyrics: Lyrics? get() = storedLyrics
     private fun bounded(lines: List<LyricLine>) = lines.size <= 10_000 &&
         lines.sumOf { it.text.length.toLong() } <= 1_000_000 &&
         lines.sumOf { it.words?.size?.toLong() ?: 0L } <= 20_000

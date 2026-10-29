@@ -75,7 +75,7 @@ The signed **Lyric offset (ms)** is persisted and shared with internal playback:
 
 **Reproducible bridge and mod build (maintainers)**
 
-Use Visual Studio 2022 C++ tools, Windows SDK 10.0.22621.0 with C++/WinRT headers (as in CI), CMake 3.21+, and JDK 21. From the repository root:
+Use Visual Studio 2022 C++ tools, Windows SDK 10.0.22621.0 with C++/WinRT headers (the minimum for the default strict build, as in CI), CMake 3.21+, and JDK 21. The build SDK requirement is separate from the Windows 10 1809 runtime minimum. From the repository root:
 
 ```powershell
 cmake -S native/apple-music-bridge -B native/apple-music-bridge/build -A x64 "-DCMAKE_SYSTEM_VERSION=10.0.22621.0"
@@ -86,6 +86,14 @@ cmake --install native/apple-music-bridge/build --config Release --prefix common
 .\modern\gradlew.bat -p modern :1.21.1-fabric:build --no-daemon
 ```
 
+For the older SDK 10.0.19041.0 C++/WinRT headers, independent Windows validation at `88c0691` passed with relaxed two-phase lookup. Use a separate build directory and this configure command, then the same build/test/install steps with that directory:
+
+```powershell
+cmake -S native/apple-music-bridge -B native/apple-music-bridge/build-sdk19041 -A x64 "-DCMAKE_SYSTEM_VERSION=10.0.19041.0" "-DCMAKE_CXX_FLAGS=/Zc:twoPhase- /EHsc"
+```
+
+`/W4 /WX` remains enabled. This workaround is not needed for the CI SDK; SDK 17763 compilation has not been validated. Keep each complete `-D...` argument quoted in PowerShell.
+
 The install places `native/windows-x64/dango-apple-music.exe` in core resources before shading. The workflow verifies that the distributable jar contains it and uploads the jar plus helper.
 No executable is committed. A separately built trusted helper may alternatively be installed beside the mod jar as `dango-apple-music.exe`.
 Shared code still emits Java 8 bytecode; modern uses JDK 21, modern26 JDK 25, legacy JDK 8.
@@ -95,6 +103,8 @@ Each invocation emits one bounded JSON snapshot (app/session identity, title/art
 **Validation / 手动验收（Windows + Apple Music + Minecraft，尚待实机验证）**
 
 Automated fake-clock/provider tests and portable native protocol tests are separate from hardware validation. Consult the PR/Actions results for commands actually run; the following is a **pending manual checklist**, not a claim of tested hardware:
+
+Baseline evidence at `88c0691`: [Windows CI run 40840987594](https://github.com/tcz717/DangoMusic/actions/runs/40840987594) passed native build/tests, the one-shot helper contract, common JVM tests/UI build, Fabric 1.21.1 packaging, and embedded-helper verification. Independent local Windows validation also passed 25 JVM tests and Fabric packaging using a temporary source copy restricted to the `1.21.1-fabric` target and an external mirror init script; this is single-target evidence, not an all-variant build. The local SDK 19041 helper/CTest check used the flags above and observed only a stopped/empty Apple Music session, not real playback. Later review-fix validation is reported separately in the PR.
 
 - [ ] Enable external mode during internal playback: internal audio stops; queue/transport/hotkeys cannot start a second stream; disabling restores normal internal controls without auto-play.
 - [ ] Play a known matching track in Apple Music: title, artists, cover and timed words appear in the existing 3D renderer. Switch lyric provider and language; verify Chinese/English settings/help/status.

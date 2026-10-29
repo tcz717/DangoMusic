@@ -2,6 +2,7 @@ package me.sorihiko.dango.music.external
 
 import me.sorihiko.dango.lyrics.LyricLine
 import me.sorihiko.dango.lyrics.LyricSplit
+import me.sorihiko.dango.lyrics.LyricWord
 import me.sorihiko.dango.lyrics.Lyrics
 import me.sorihiko.dango.music.MusicSource
 import me.sorihiko.dango.music.MusicSourceApi
@@ -35,10 +36,11 @@ class ExternalPlaybackTest {
         var candidates = emptyList<NeteaseTrack>()
         var searches = 0
         var lyricRequests = 0
+        var suppliedLyrics: Lyrics? = null
         override fun search(query: String): List<NeteaseTrack> { searches++; return candidates }
         override fun lyrics(track: NeteaseTrack): Lyrics {
             lyricRequests++
-            return Lyrics(listOf(LyricLine(0, track.name)), "fake")
+            return suppliedLyrics ?: Lyrics(listOf(LyricLine(0, track.name)), "fake")
         }
         override fun songUrl(track: NeteaseTrack): NeteaseApi.SongUrl? = error("Must never request audio")
     }
@@ -270,7 +272,9 @@ class ExternalPlaybackTest {
         val source = Source().apply { candidates = listOf(track(), track()) }
         val result = ExternalMatcher().resolve(sample(clock), source)!!
         assertEquals(1, source.lyricRequests)
-        (result.lyrics!!.lines as MutableList).clear()
+        assertThrows(UnsupportedOperationException::class.java) {
+            (result.lyrics!!.lines as MutableList).clear()
+        }
         assertEquals(1, result.lyrics!!.lines.size)
     }
 
@@ -358,9 +362,113 @@ class ExternalPlaybackTest {
         try {
             LyricSplit.enabled = true
             val result = ExternalMatch(track(), Lyrics(listOf(LyricLine(0, "你好 世界"), LyricLine(5_000, "再见")), "fake"))
-            assertEquals(3, result.lyrics!!.lines.size)
+            val lyrics = result.lyrics!!
+            val split = lyrics.lines
+            assertEquals(listOf(0L, 2_125L, 5_000L), split.map { it.timeMs })
             LyricSplit.enabled = false
-            assertEquals(2, result.lyrics!!.lines.size)
+            val raw = lyrics.lines
+            assertEquals(listOf("你好 世界", "再见"), raw.map { it.text })
+            assertEquals(listOf(0L, 5_000L), raw.map { it.timeMs })
+            repeat(128) {
+                LyricSplit.enabled = true
+                assertSame(lyrics, result.lyrics)
+                assertSame(split, result.lyrics!!.lines)
+                LyricSplit.enabled = false
+                assertSame(raw, result.lyrics!!.lines)
+            }
+        } finally { LyricSplit.enabled = before }
+    }
+
+    @Test fun snapshotsReusePreparedImmutableLyricsAndBothWordViews() {
+        val before = LyricSplit.enabled
+        try {
+            for (prepareSplit in listOf(true, false)) {
+                LyricSplit.enabled = prepareSplit
+                val words = mutableListOf(
+                    LyricWord(1_000, 600, "你好"),
+                    LyricWord(1_600, 0, " "),
+                    LyricWord(2_600, 800, "世界"),
+                )
+                val lastWords = mutableListOf(LyricWord(5_000, 900, "再见"))
+                val providerLines = mutableListOf(
+                    LyricLine(1_000, "你好 世界", words),
+                    LyricLine(5_000, "再见", lastWords),
+                )
+                val original = Lyrics(providerLines, "fake")
+                val clock = Clock()
+                val tasks = Tasks()
+                val api = Source().apply {
+                    candidates = listOf(track())
+                    suppliedLyrics = original
+                }
+                val engine = ExternalEngine(clock, tasks, { api })
+                engine.accept(sample(clock))
+                tasks.run()
+                val snapshot = engine.snapshot()
+                val lyrics = snapshot.lyrics!!
+                assertNotSame(original, lyrics)
+                words.clear()
+                lastWords.clear()
+                providerLines.clear()
+                (original.unsplitLines as MutableList).clear()
+
+                LyricSplit.enabled = false
+                val raw = lyrics.lines
+                assertEquals(listOf("你好 世界", "再见"), raw.map { it.text })
+                assertEquals(listOf(1_000L, 5_000L), raw.map { it.timeMs })
+                assertEquals(listOf(1_000L, 1_600L, 2_600L), raw[0].words!!.map { it.startMs })
+                assertEquals(listOf(600L, 0L, 800L), raw[0].words!!.map { it.durMs })
+                LyricSplit.enabled = true
+                val split = lyrics.lines
+                assertEquals(listOf("你好", "世界", "再见"), split.map { it.text })
+                assertEquals(listOf(1_000L, 2_600L, 5_000L), split.map { it.timeMs })
+                assertEquals(listOf(2_600L), split[1].words!!.map { it.startMs })
+                assertEquals(listOf(800L), split[1].words!!.map { it.durMs })
+
+                for (view in listOf(raw, split)) {
+                    assertThrows(UnsupportedOperationException::class.java) { (view as MutableList).clear() }
+                    for (line in view) {
+                        assertThrows(UnsupportedOperationException::class.java) {
+                            (line.words as MutableList).clear()
+                        }
+                    }
+                }
+                repeat(128) {
+                    for (enabled in listOf(false, true)) {
+                        LyricSplit.enabled = enabled
+                        val expected = if (enabled) split else raw
+                        val next = engine.snapshot()
+                        assertSame(lyrics, snapshot.lyrics)
+                        assertSame(lyrics, next.lyrics)
+                        assertSame(expected, next.lyrics!!.lines)
+                        for (i in expected.indices) {
+                            assertSame(expected[i], next.lyrics!!.lines[i])
+                            assertSame(expected[i].words, next.lyrics!!.lines[i].words)
+                            assertSame(expected[i].words!![0], next.lyrics!!.lines[i].words!![0])
+                        }
+                    }
+                }
+                assertEquals(1, api.lyricRequests)
+            }
+        } finally { LyricSplit.enabled = before }
+    }
+
+    @Test fun lyricBoundsUseRawInputRegardlessOfSplitSetting() {
+        val before = LyricSplit.enabled
+        try {
+            val expanding = Lyrics(List(6_000) { LyricLine(it * 5_000L, "你好 世界") }, "fake")
+            val oversized = Lyrics(listOf(LyricLine(0, "你好" + " ".repeat(1_000_000) + "世界")), "fake")
+            for (enabled in listOf(true, false)) {
+                LyricSplit.enabled = enabled
+                val match = ExternalMatch(track(), expanding)
+                assertTrue(match.hasLyrics)
+                assertNotNull(match.lyrics)
+                assertFalse(ExternalMatch(track(), oversized).hasLyrics)
+                LyricSplit.enabled = true
+                assertEquals(12_000, match.lyrics!!.lines.size)
+                LyricSplit.enabled = false
+                assertEquals(6_000, match.lyrics!!.lines.size)
+            }
         } finally { LyricSplit.enabled = before }
     }
 
